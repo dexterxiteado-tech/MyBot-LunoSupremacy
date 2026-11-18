@@ -12,6 +12,7 @@
     "@whiskeysockets/baileys": "latest",
     "express": "^4.19.2",
     "pino": "^9.0.0",
-    "qrcode": "^1.5.3"
+    "qrcode": "^1.5.3",
+    "ffmpeg-static": "^5.2.0"
   }
 }
