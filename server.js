@@ -10,6 +10,7 @@ const fs = require("fs");
 const crypto = require("crypto");
 const pino = require("pino");
 const QRCode = require("qrcode");
+const { handleMessage } = require("./commands");
 const {
   default: makeWASocket,
   useMultiFileAuthState,
@@ -144,32 +145,11 @@ async function startSocket(id) {
     }
   });
 
-  // Comandos básicos del bot en cada cuenta vinculada.
+  // Comandos completos de DEXTER MODZ en cada cuenta vinculada.
   sock.ev.on("messages.upsert", async ({ messages }) => {
     for (const msg of messages || []) {
       try {
-        if (!msg.message) continue;
-        const jid = msg.key.remoteJid;
-        if (!jid || jid === "status@broadcast") continue;
-
-        const body = (
-          msg.message.conversation ||
-          msg.message.extendedTextMessage?.text ||
-          ""
-        ).trim().toLowerCase();
-
-        if (!/^[!.\/]/.test(body)) continue;
-        const cmd = body.slice(1);
-
-        if (cmd === "ping") {
-          await sock.sendMessage(jid, { text: "🏓 PONG!\n🔥 DEXTER MODZ ACTIVO" });
-        } else if (cmd === "hola") {
-          await sock.sendMessage(jid, { text: "🔥 DEXTER MODZ BOT ACTIVO\n\nBienvenido." });
-        } else if (cmd === "menu") {
-          await sock.sendMessage(jid, {
-            text: "🔥 DEXTER MODZ\n\n• !ping\n• !hola\n• !menu"
-          });
-        }
+        await handleMessage(sock, msg);
       } catch (e) {
         log("[ERROR MENSAJE]", e.message);
       }
