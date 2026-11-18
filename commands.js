@@ -296,8 +296,8 @@ async function handleSticker(sock, jid, message) {
       await sock.sendMessage(jid, {
         text:
           "🖼️ Para crear un sticker:\n\n" +
-          "1. Responde a una imagen o video con !sticker.\n" +
-          "2. También puedes enviar una imagen con el texto !sticker."
+          "1. Responde a una imagen o video con .s.\n" +
+          "2. También puedes enviar una imagen con el texto .s."
       });
       return;
     }
@@ -400,7 +400,7 @@ async function handleToImage(sock, jid, message) {
 
     if (!target || target.kind !== "sticker") {
       await sock.sendMessage(jid, {
-        text: "🖼️ Responde a un sticker con !toimg."
+        text: "🖼️ Responde a un sticker con .toimg."
       });
       return;
     }
@@ -455,7 +455,7 @@ async function handleToAudio(sock, jid, message) {
 
     if (!target || !["video", "audio"].includes(target.kind)) {
       await sock.sendMessage(jid, {
-        text: "🎵 Responde a un video o audio con !toaudio."
+        text: "🎵 Responde a un video o audio con .toaudio."
       });
       return;
     }
@@ -513,7 +513,7 @@ async function handleQR(sock, jid, text) {
 
   if (!content) {
     await sock.sendMessage(jid, {
-      text: "Uso: !qr texto o enlace"
+      text: "Uso: .qr texto o enlace"
     });
     return;
   }
@@ -577,30 +577,478 @@ async function showRuntime(sock, jid) {
 }
 
 
-function getMenu() {
-  return (
-    "╔══════════════════════════╗\n" +
-    "       🔥 DEXTER MODZ 🔥\n" +
-    "╚══════════════════════════╝\n\n" +
-    "🖼️ MULTIMEDIA\n" +
-    "• !sticker - Imagen/video a sticker\n" +
-    "• !toimg - Sticker a imagen\n" +
-    "• !toaudio - Video/audio a MP3\n" +
-    "• !qr texto - Crear código QR\n\n" +
-    "⚙️ SISTEMA\n" +
-    "• !ping - Estado del bot\n" +
-    "• !uptime - Tiempo activo\n" +
-    "• !runtime - Información del sistema\n" +
-    "• !info - Información del bot\n\n" +
-    "• hola - Saludo automático\n\n" +
-    "🟢 DEXTER MODZ ACTIVO"
+// ======================================================
+// CONFIGURACION (variables de entorno opcionales)
+// ======================================================
+
+const BOT_NAME = process.env.BOT_NAME || "DEXTER MODZ";
+const BOT_VERSION = process.env.BOT_VERSION || "v.1.0.0";
+const BOT_FOOTER = process.env.BOT_FOOTER || "by Dxx Modz";
+const YOUTUBE_LINK = process.env.YOUTUBE_LINK || "";
+const CHANNEL_JID = process.env.CHANNEL_JID || "";          // 120363...@newsletter
+const CHANNEL_NAME = process.env.CHANNEL_NAME || BOT_NAME;
+const MENU_IMAGE_URL = process.env.MENU_IMAGE_URL || "";
+const MENU_IMAGE_FILE = ["menu.jpg", "menu.jpeg", "menu.png"]
+  .map(n => path.join(__dirname, n))
+  .find(p => fs.existsSync(p));
+
+const DATA_DIR = process.env.DATA_DIR ||
+  (process.env.SESSIONS_DIR ? path.dirname(process.env.SESSIONS_DIR) : path.join(__dirname, "data"));
+try { fs.mkdirSync(DATA_DIR, { recursive: true }); } catch (_) {}
+
+// ======================================================
+// UTILIDADES DE JID / GRUPOS
+// ======================================================
+
+const norm = j => String(j || "").split(":")[0].split("@")[0];
+const pick = arr => arr[Math.floor(Math.random() * arr.length)];
+const stripAccents = t => String(t).normalize("NFD").replace(/[̀-ͯ]/g, "");
+
+function idsOf(p) {
+  return [p.id, p.phoneNumber, p.lid].filter(Boolean).map(norm);
+}
+function isAdminIn(meta, candidates) {
+  const set = new Set(candidates.filter(Boolean).map(norm));
+  return (meta?.participants || []).some(
+    p => p.admin && idsOf(p).some(x => set.has(x))
   );
 }
+const senderIds = msg => [msg.key?.participant, msg.key?.participantAlt];
+const botIds = sock => [sock.user?.id, sock.user?.lid];
+
+function senderJid(msg, sock, jid) {
+  if (jid.endsWith("@g.us")) return msg.key.participant || sock.user?.id || jid;
+  return msg.key.fromMe ? (sock.user?.id || jid) : jid;
+}
+
+const metaCache = new Map();
+async function getMeta(sock, jid, force = false) {
+  const key = norm(sock.user?.id) + ":" + jid;
+  const hit = metaCache.get(key);
+  if (!force && hit && Date.now() - hit.at < 60000) return hit.meta;
+  try {
+    const meta = await sock.groupMetadata(jid);
+    metaCache.set(key, { meta, at: Date.now() });
+    if (metaCache.size > 500) metaCache.delete(metaCache.keys().next().value);
+    return meta;
+  } catch (e) {
+    log("[GROUP META]", e.message);
+    return null;
+  }
+}
+
+async function groupGuard(sock, msg, jid, needBotAdmin = true) {
+  if (!jid.endsWith("@g.us")) {
+    await sock.sendMessage(jid, { text: "👥 Este comando solo funciona en grupos." });
+    return null;
+  }
+  const meta = await getMeta(sock, jid, true);
+  if (!meta) {
+    await sock.sendMessage(jid, { text: "❌ No pude leer la información del grupo." });
+    return null;
+  }
+  if (!msg.key.fromMe && !isAdminIn(meta, senderIds(msg))) {
+    await sock.sendMessage(jid, { text: "⛔ Solo los administradores pueden usar este comando." });
+    return null;
+  }
+  if (needBotAdmin && !isAdminIn(meta, botIds(sock))) {
+    await sock.sendMessage(jid, { text: "⚠️ Necesito ser administrador del grupo para hacer esto." });
+    return null;
+  }
+  return meta;
+}
+
+// ======================================================
+// AJUSTES POR GRUPO (se guardan en DATA_DIR/groups.json)
+// ======================================================
+
+const SETTINGS_FILE = path.join(DATA_DIR, "groups.json");
+let groupSettings = {};
+try { groupSettings = JSON.parse(fs.readFileSync(SETTINGS_FILE, "utf8")); } catch (_) {}
+function saveSettings() {
+  try { fs.writeFileSync(SETTINGS_FILE, JSON.stringify(groupSettings)); }
+  catch (e) { log("[SETTINGS]", e.message); }
+}
+const settingsKey = (sock, jid) => norm(sock.user?.id) + ":" + jid;
+
+const ANTI_LABELS = {
+  antilink: "enlaces",
+  antispam: "spam",
+  antisticker: "stickers",
+  antifotos: "fotos",
+  antivideos: "videos",
+  antiaudios: "audios"
+};
+
+async function handleAntiToggle(sock, msg, jid, cmd, arg) {
+  const meta = await groupGuard(sock, msg, jid, false);
+  if (!meta) return;
+  const value = arg.toLowerCase();
+  if (!["on", "off"].includes(value)) {
+    await sock.sendMessage(jid, { text: `Uso: .${cmd} on  |  .${cmd} off` });
+    return;
+  }
+  const key = settingsKey(sock, jid);
+  groupSettings[key] = groupSettings[key] || {};
+  groupSettings[key][cmd] = value === "on";
+  saveSettings();
+  let text = `${value === "on" ? "✅" : "🚫"} ${cmd} ${value === "on" ? "activado" : "desactivado"}.`;
+  if (value === "on" && !isAdminIn(meta, botIds(sock))) {
+    text += "\n⚠️ Para borrar mensajes necesito ser administrador del grupo.";
+  }
+  await sock.sendMessage(jid, { text });
+}
+
+const spamLog = new Map();
+function isSpam(key) {
+  const now = Date.now();
+  const list = (spamLog.get(key) || []).filter(t => now - t < 8000);
+  list.push(now);
+  spamLog.set(key, list);
+  if (spamLog.size > 5000) spamLog.delete(spamLog.keys().next().value);
+  return list.length > 6;
+}
+
+// Devuelve true si el mensaje fue borrado.
+async function antiChecks(sock, msg, jid) {
+  const st = groupSettings[settingsKey(sock, jid)];
+  if (!st || !Object.keys(ANTI_LABELS).some(k => st[k])) return false;
+  if (msg.key.fromMe) return false;
+
+  const content = unwrapMessage(msg.message);
+  const text = extractText(msg.message);
+  const who = msg.key.participant;
+  let reason = null;
+
+  if (st.antilink && /(https?:\/\/|www\.|chat\.whatsapp\.com\/)\S+/i.test(text)) reason = ANTI_LABELS.antilink;
+  else if (st.antisticker && content.stickerMessage) reason = ANTI_LABELS.antisticker;
+  else if (st.antifotos && content.imageMessage) reason = ANTI_LABELS.antifotos;
+  else if (st.antivideos && content.videoMessage) reason = ANTI_LABELS.antivideos;
+  else if (st.antiaudios && content.audioMessage) reason = ANTI_LABELS.antiaudios;
+  else if (st.antispam && who && isSpam(jid + ":" + who)) reason = ANTI_LABELS.antispam;
+
+  if (!reason) return false;
+
+  const meta = await getMeta(sock, jid);
+  if (isAdminIn(meta, senderIds(msg))) return false;      // los admins quedan libres
+  if (!isAdminIn(meta, botIds(sock))) return false;       // sin admin no se puede borrar
+
+  try {
+    await sock.sendMessage(jid, { delete: msg.key });
+    await sock.sendMessage(jid, {
+      text: `⚠️ @${norm(who)}, no se permiten ${reason} en este grupo.`,
+      mentions: [who]
+    });
+  } catch (e) {
+    log("[ANTI]", e.message);
+  }
+  return true;
+}
+
+// ======================================================
+// COMANDOS DE GRUPO
+// ======================================================
+
+async function handleOpenClose(sock, msg, jid, open) {
+  const meta = await groupGuard(sock, msg, jid, true);
+  if (!meta) return;
+  try {
+    await sock.groupSettingUpdate(jid, open ? "not_announcement" : "announcement");
+    await sock.sendMessage(jid, {
+      text: open ? "🔓 Grupo abierto: todos pueden escribir." : "🔒 Grupo cerrado: solo los admins pueden escribir."
+    });
+  } catch (e) {
+    await sock.sendMessage(jid, { text: "❌ No se pudo cambiar el grupo: " + e.message });
+  }
+}
+
+function memberJids(meta, sock) {
+  const me = new Set(botIds(sock).filter(Boolean).map(norm));
+  return (meta.participants || [])
+    .filter(p => !idsOf(p).some(x => me.has(x)))
+    .map(p => p.id);
+}
+
+async function handleInvoke(sock, msg, jid, args) {
+  const meta = await groupGuard(sock, msg, jid, false);
+  if (!meta) return;
+  const members = memberJids(meta, sock);
+  const list = members.map(j => `• @${norm(j)}`).join("\n");
+  await sock.sendMessage(jid, {
+    text: `📣 *INVOCACIÓN*${args ? "\n" + args : ""}\n\n${list}`,
+    mentions: members
+  });
+}
+
+async function handleTag(sock, msg, jid, args) {
+  const meta = await groupGuard(sock, msg, jid, false);
+  if (!meta) return;
+  const quoted = findContextInfo(msg.message)?.quotedMessage;
+  const text = args || (quoted ? extractText(quoted) : "") || "🔔";
+  await sock.sendMessage(jid, { text, mentions: memberJids(meta, sock) });
+}
+
+async function handleRaffle(sock, msg, jid, args) {
+  const meta = await groupGuard(sock, msg, jid, false);
+  if (!meta) return;
+  const members = memberJids(meta, sock);
+  if (!members.length) return;
+  const winner = pick(members);
+  await sock.sendMessage(jid, {
+    text: `🎉 *SORTEO*${args ? "\n🎁 Premio: " + args : ""}\n\n🏆 Ganador: @${norm(winner)}`,
+    mentions: [winner]
+  });
+}
+
+// ======================================================
+// TEXTOS
+// ======================================================
+
+async function handleTextStyle(sock, jid, cmd, text) {
+  if (!text) {
+    await sock.sendMessage(jid, { text: `Uso: .${cmd} tu texto` });
+    return;
+  }
+  const out = {
+    negrita: t => `*${t}*`,
+    cursiva: t => `_${t}_`,
+    tachado: t => `~${t}~`,
+    subrayada: t => [...t].map(c => (c === " " ? c : c + "̲")).join("")
+  }[cmd](text.slice(0, 1000));
+  await sock.sendMessage(jid, { text: out });
+}
+
+// ======================================================
+// JUEGOS
+// ======================================================
+
+const HANG_WORDS = [
+  "computadora", "telefono", "mariposa", "elefante", "guitarra", "chocolate",
+  "montana", "bicicleta", "universo", "aventura", "dinosaurio", "cocodrilo",
+  "refrigerador", "escuela", "pelicula", "estrella", "tormenta", "helado",
+  "volcan", "planeta", "pirata", "fantasma", "tesoro", "castillo", "dragon",
+  "musica", "futbol", "playa", "ventana", "cohete"
+];
+const hangGames = new Map();
+
+function hangView(g) {
+  const shown = [...g.word].map(c => (g.guessed.has(c) ? c : "_")).join(" ");
+  return (
+    `🎯 *AHORCADO*\n\n${shown.toUpperCase()}\n\n` +
+    `${"❤️".repeat(g.lives)}${"🖤".repeat(6 - g.lives)}\n` +
+    `Letras usadas: ${[...g.guessed].join(", ") || "-"}\n\n` +
+    "Responde con *.ahorcado letra* o *.ahorcado palabra*"
+  );
+}
+
+async function handleHangman(sock, jid, arg) {
+  let g = hangGames.get(jid);
+  const guess = stripAccents(arg.toLowerCase().trim());
+
+  if (guess === "salir" && g) {
+    hangGames.delete(jid);
+    await sock.sendMessage(jid, { text: `🏳️ Juego terminado. La palabra era: *${g.word.toUpperCase()}*` });
+    return;
+  }
+  if (!g) {
+    g = { word: pick(HANG_WORDS), guessed: new Set(), lives: 6 };
+    hangGames.set(jid, g);
+    if (hangGames.size > 500) hangGames.delete(hangGames.keys().next().value);
+    await sock.sendMessage(jid, { text: hangView(g) });
+    return;
+  }
+  if (!guess) {
+    await sock.sendMessage(jid, { text: hangView(g) });
+    return;
+  }
+
+  if (guess.length === 1) {
+    if (!/[a-zñ]/.test(guess)) return;
+    if (g.guessed.has(guess)) {
+      await sock.sendMessage(jid, { text: "Esa letra ya la usaste.\n\n" + hangView(g) });
+      return;
+    }
+    g.guessed.add(guess);
+    if (!g.word.includes(guess)) g.lives--;
+  } else if (guess === g.word) {
+    [...g.word].forEach(c => g.guessed.add(c));
+  } else {
+    g.lives--;
+  }
+
+  const won = [...g.word].every(c => g.guessed.has(c));
+  if (won) {
+    hangGames.delete(jid);
+    await sock.sendMessage(jid, { text: `🏆 ¡Ganaste! La palabra era *${g.word.toUpperCase()}*` });
+  } else if (g.lives <= 0) {
+    hangGames.delete(jid);
+    await sock.sendMessage(jid, { text: `💀 Perdiste. La palabra era *${g.word.toUpperCase()}*` });
+  } else {
+    await sock.sendMessage(jid, { text: hangView(g) });
+  }
+}
+
+const TRUE_FALSE = [
+  ["El Sol es una estrella.", true],
+  ["La Gran Muralla China se ve a simple vista desde el espacio.", false],
+  ["Los murciélagos son ciegos.", false],
+  ["El agua hierve a 100 °C al nivel del mar.", true],
+  ["Los humanos usan solo el 10% de su cerebro.", false],
+  ["Un pulpo tiene tres corazones.", true],
+  ["Júpiter es el planeta más grande del sistema solar.", true],
+  ["El tomate es botánicamente una fruta.", true],
+  ["Un rayo nunca cae dos veces en el mismo lugar.", false],
+  ["La capital de Australia es Sídney.", false],
+  ["Los delfines son peces.", false],
+  ["El fémur es el hueso más largo del cuerpo humano.", true],
+  ["La luz viaja más rápido que el sonido.", true],
+  ["Las arañas son insectos.", false],
+  ["El símbolo químico del oro es Au.", true],
+  ["Venus es el planeta más cercano al Sol.", false],
+  ["El corazón humano tiene cuatro cavidades.", true],
+  ["Los camellos almacenan agua en sus jorobas.", false],
+  ["El océano Pacífico es el más grande del mundo.", true],
+  ["Un año luz mide tiempo.", false]
+];
+const tfGames = new Map();
+
+async function handleTrueFalse(sock, jid) {
+  const [text, value] = pick(TRUE_FALSE);
+  tfGames.set(jid, value);
+  if (tfGames.size > 500) tfGames.delete(tfGames.keys().next().value);
+  await sock.sendMessage(jid, {
+    text: `🧠 *VERDADERO O FALSO*\n\n${text}\n\nResponde con *.v* (verdadero) o *.f* (falso)`
+  });
+}
+
+async function handleTfAnswer(sock, jid, answer) {
+  if (!tfGames.has(jid)) {
+    await sock.sendMessage(jid, { text: "No hay pregunta activa. Escribe *.v/f* para empezar." });
+    return;
+  }
+  const correct = tfGames.get(jid) === answer;
+  tfGames.delete(jid);
+  await sock.sendMessage(jid, {
+    text: correct ? "✅ ¡Correcto!" : `❌ Incorrecto. La respuesta era *${answer ? "FALSO" : "VERDADERO"}*.`
+  });
+}
+
+// ======================================================
+// TROOL (bromas con menciones)
+// ======================================================
+
+const ACTIONS = {
+  abrazar: (a, b) => `🤗 ${a} abrazó a ${b}`,
+  bezar: (a, b) => `😘 ${a} le dio un beso a ${b}`,
+  besar: (a, b) => `😘 ${a} le dio un beso a ${b}`,
+  nalguear: (a, b) => `😳 ${a} le dio una nalgada a ${b}`,
+  coquetear: (a, b) => `😏 ${a} está coqueteando con ${b}`,
+  jugar: (a, b) => `🎮 ${a} invitó a ${b} a jugar`,
+  golpear: (a, b) => `👊 ${a} golpeó a ${b}`,
+  bofetear: (a, b) => `🖐️ ${a} le dio una bofetada a ${b}`
+};
+const METERS = {
+  menso: "menso", burro: "burro", idiota: "idiota", pendejo: "pendejo", pajero: "pajero"
+};
+
+function findTarget(msg) {
+  const ctx = findContextInfo(msg.message);
+  return ctx?.mentionedJid?.[0] || ctx?.participant || null;
+}
+
+async function handleTrool(sock, msg, jid, cmd) {
+  const me = senderJid(msg, sock, jid);
+  const target = findTarget(msg);
+
+  if (ACTIONS[cmd]) {
+    if (!target) {
+      await sock.sendMessage(jid, { text: `Menciona o responde a alguien.\nEjemplo: .${cmd} @usuario` });
+      return;
+    }
+    await sock.sendMessage(jid, {
+      text: ACTIONS[cmd](`@${norm(me)}`, `@${norm(target)}`),
+      mentions: [me, target]
+    });
+    return;
+  }
+
+  const who = target || me;
+  const pct = Math.floor(Math.random() * 101);
+  await sock.sendMessage(jid, {
+    text: `🤪 @${norm(who)} es ${pct}% ${METERS[cmd]}`,
+    mentions: [who]
+  });
+}
+
+// ======================================================
+// MENU (formato Luno Bot, con "reenviado de canal")
+// ======================================================
+
+function getMenu() {
+  const fecha = new Date().toLocaleDateString("es-MX", {
+    timeZone: "America/Mexico_City", day: "2-digit", month: "2-digit", year: "numeric"
+  });
+  const cmds = list => list.map(c => `> *${c}*`).join("\n");
+  const sections = [
+    ["STICKERS", [".s", ".toimg", ".tag"]],
+    ["TEXTOS", [".negrita", ".cursiva", ".tachado", ".subrayada"]],
+    ["JUEGOS", [".ahorcado", ".v/f"]],
+    ["GRUPOS", [".abrir", ".cerrar", ".invocar", ".sorteo", ".antilink", ".antispam",
+                ".antisticker", ".antifotos", ".antivideos", ".antiaudios"]],
+    ["TROOL", [".abrazar", ".bezar", ".nalguear", ".coquetear", ".jugar", ".golpear",
+               ".bofetear", ".menso", ".burro", ".pendejo", ".idiota", ".pajero"]],
+    ["UTILIDADES", [".toaudio", ".qr", ".ping", ".uptime", ".runtime", ".info"]]
+  ];
+
+  const out = [`*_${BOT_NAME} ${BOT_VERSION}_* ☪️`, " "];
+  if (YOUTUBE_LINK) out.push(`*_Youtube_* \`${YOUTUBE_LINK}\``, "");
+  out.push(`_*Fecha*_ \`${fecha}\``, "");
+  for (const [title, list] of sections) {
+    out.push(`_🌙 ${title}_`, "", cmds(list), "");
+  }
+  out.push(`\`©️ ${BOT_FOOTER}\``);
+  return out.join("\n");
+}
+
+function channelContext() {
+  if (!CHANNEL_JID) return undefined;
+  return {
+    isForwarded: true,
+    forwardingScore: 999,
+    forwardedNewsletterMessageInfo: {
+      newsletterJid: CHANNEL_JID,
+      newsletterName: CHANNEL_NAME,
+      serverMessageId: 100
+    }
+  };
+}
+
+async function sendMenu(sock, jid) {
+  const caption = getMenu();
+  const contextInfo = channelContext();
+  const image = MENU_IMAGE_FILE ? { url: MENU_IMAGE_FILE }
+    : MENU_IMAGE_URL ? { url: MENU_IMAGE_URL } : null;
+  try {
+    if (image) await sock.sendMessage(jid, { image, caption, contextInfo });
+    else await sock.sendMessage(jid, { text: caption, contextInfo });
+  } catch (e) {
+    log("[MENU]", e.message);
+    await sock.sendMessage(jid, { text: caption });
+  }
+}
+
+// ======================================================
+// MANEJADOR PRINCIPAL (uno por cuenta vinculada)
+// ======================================================
 
 const seenBySocket = new WeakMap();
 const lastCommandAt = new Map();
 const pendingJobs = new Set();
 const COOLDOWN_MS = 1500;
+const NOT_AVAILABLE = new Set([
+  "play", "ytmp4", "fb", "ig", "tiktok", "tiktoksearch", "dl", "google",
+  "ia", "deepseek", "chatgpt"
+]);
 
 async function heavy(sock, jid, task) {
   if (pendingJobs.has(jid)) {
@@ -635,43 +1083,90 @@ async function handleMessage(sock, msg) {
     if (seen.size > 1000) seen.delete(seen.values().next().value);
   }
 
+  // Moderación del grupo (antilink, antispam, etc.).
+  if (jid.endsWith("@g.us")) {
+    try { if (await antiChecks(sock, msg, jid)) return; }
+    catch (e) { log("[ANTI ERROR]", e.message); }
+  }
+
   const trimmed = extractText(msg.message).trim();
-  const isPrefixed = /^[!.\/]/.test(trimmed);
-  if (!trimmed || (!isPrefixed && trimmed.toLowerCase() !== "hola")) return;
+  if (!trimmed) return;
+
+  const m = trimmed.match(/^[!.\/]([^\s]+)(?:\s+([\s\S]*))?$/);
+  const cmd = m ? m[1].toLowerCase() : (trimmed.toLowerCase() === "hola" ? "hola" : null);
+  const args = m ? (m[2] || "").trim() : "";
+  if (!cmd) return;
 
   const now = Date.now();
   if (now - (lastCommandAt.get(jid) || 0) < COOLDOWN_MS) return;
   lastCommandAt.set(jid, now);
   if (lastCommandAt.size > 2000) lastCommandAt.delete(lastCommandAt.keys().next().value);
 
-  if (/^[!.\/]sticker$/i.test(trimmed))
-    return heavy(sock, jid, () => handleSticker(sock, jid, msg.message));
-  if (/^[!.\/]toimg$/i.test(trimmed))
-    return heavy(sock, jid, () => handleToImage(sock, jid, msg.message));
-  if (/^[!.\/]toaudio$/i.test(trimmed))
-    return heavy(sock, jid, () => handleToAudio(sock, jid, msg.message));
-  if (/^[!.\/]qr(?:\s|$)/i.test(trimmed))
-    return handleQR(sock, jid, trimmed.replace(/^[!.\/]qr/i, "").trim().slice(0, 1000));
+  switch (true) {
+    // Stickers y multimedia
+    case cmd === "s" || cmd === "sticker":
+      return heavy(sock, jid, () => handleSticker(sock, jid, msg.message));
+    case cmd === "toimg":
+      return heavy(sock, jid, () => handleToImage(sock, jid, msg.message));
+    case cmd === "toaudio":
+      return heavy(sock, jid, () => handleToAudio(sock, jid, msg.message));
+    case cmd === "qr":
+      return handleQR(sock, jid, args.slice(0, 1000));
 
-  const command = trimmed.toLowerCase().replace(/^[!.\/]/, "").trim();
+    // Textos
+    case ["negrita", "cursiva", "tachado", "subrayada"].includes(cmd):
+      return handleTextStyle(sock, jid, cmd, args);
 
-  if (command === "hola") {
-    await sock.sendMessage(jid, { text: "🔥 DEXTER MODZ BOT ACTIVO\n\nBienvenido." });
-  } else if (command === "menu" || command === "help") {
-    await sock.sendMessage(jid, { text: getMenu() });
-  } else if (command === "ping") {
-    await sock.sendMessage(jid, { text: "🏓 PONG!\n🔥 DEXTER MODZ ACTIVO" });
-  } else if (command === "info") {
-    await sock.sendMessage(jid, {
-      text: "🔥 DEXTER MODZ\nMotor: Baileys\nProcesamiento: FFmpeg\nMultimedia: Activo\nSistema: Activo"
-    });
-  } else if (command === "uptime") {
-    await sock.sendMessage(jid, {
-      text: `⏱️ Bot activo durante:\n${formatDuration((Date.now() - startedAt) / 1000)}`
-    });
-  } else if (command === "runtime") {
-    await showRuntime(sock, jid);
+    // Juegos
+    case cmd === "ahorcado":
+      return handleHangman(sock, jid, args);
+    case cmd === "v/f" || cmd === "vf":
+      return handleTrueFalse(sock, jid);
+    case cmd === "v":
+      return handleTfAnswer(sock, jid, true);
+    case cmd === "f":
+      return handleTfAnswer(sock, jid, false);
+
+    // Grupos
+    case cmd === "abrir":
+      return handleOpenClose(sock, msg, jid, true);
+    case cmd === "cerrar":
+      return handleOpenClose(sock, msg, jid, false);
+    case cmd === "invocar":
+      return handleInvoke(sock, msg, jid, args);
+    case cmd === "tag":
+      return handleTag(sock, msg, jid, args);
+    case cmd === "sorteo":
+      return handleRaffle(sock, msg, jid, args);
+    case Object.prototype.hasOwnProperty.call(ANTI_LABELS, cmd):
+      return handleAntiToggle(sock, msg, jid, cmd, args);
+
+    // Trool
+    case Object.prototype.hasOwnProperty.call(ACTIONS, cmd) ||
+         Object.prototype.hasOwnProperty.call(METERS, cmd):
+      return handleTrool(sock, msg, jid, cmd);
+
+    // Generales
+    case cmd === "hola":
+      return void await sock.sendMessage(jid, { text: `🔥 ${BOT_NAME} BOT ACTIVO\n\nBienvenido.` });
+    case cmd === "menu" || cmd === "help" || cmd === "comandos":
+      return sendMenu(sock, jid);
+    case cmd === "ping":
+      return void await sock.sendMessage(jid, { text: `🏓 PONG!\n🔥 ${BOT_NAME} ACTIVO` });
+    case cmd === "info":
+      return void await sock.sendMessage(jid, {
+        text: `🔥 ${BOT_NAME} ${BOT_VERSION}\nMotor: Baileys\nProcesamiento: FFmpeg\nSistema: Activo`
+      });
+    case cmd === "uptime":
+      return void await sock.sendMessage(jid, {
+        text: `⏱️ Bot activo durante:\n${formatDuration((Date.now() - startedAt) / 1000)}`
+      });
+    case cmd === "runtime":
+      return showRuntime(sock, jid);
+
+    case NOT_AVAILABLE.has(cmd):
+      return void await sock.sendMessage(jid, { text: "🚧 Este comando todavía no está disponible." });
   }
 }
 
-module.exports = { handleMessage };
+module.exports = { handleMessage, getMenu };
