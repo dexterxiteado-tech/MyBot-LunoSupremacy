@@ -1,0 +1,271 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DEXTER MODZ - Vincular bot</title>
+<style>
+  :root {
+    --bg: #0b0b10; --card: #14141d; --line: #262636;
+    --text: #f2f2f7; --muted: #8e8ea3; --accent: #ff4d2e; --ok: #2ecc71;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100vh; display: grid; place-items: center;
+    background: radial-gradient(circle at 50% 0%, #2a1010 0%, var(--bg) 55%);
+    color: var(--text); font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+    padding: 16px;
+  }
+  .card {
+    width: 100%; max-width: 420px; background: var(--card);
+    border: 1px solid var(--line); border-radius: 18px; padding: 24px;
+    box-shadow: 0 20px 60px rgba(0,0,0,.5);
+  }
+  h1 { margin: 0 0 4px; font-size: 22px; text-align: center; }
+  .sub { margin: 0 0 20px; text-align: center; color: var(--muted); font-size: 14px; }
+  .tabs { display: flex; gap: 8px; margin-bottom: 18px; }
+  .tab {
+    flex: 1; padding: 10px; border-radius: 10px; border: 1px solid var(--line);
+    background: transparent; color: var(--muted); font-size: 14px; cursor: pointer;
+  }
+  .tab.active { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+  label { display: block; font-size: 13px; color: var(--muted); margin-bottom: 6px; }
+  input {
+    width: 100%; padding: 12px; border-radius: 10px; border: 1px solid var(--line);
+    background: #0d0d14; color: var(--text); font-size: 16px; outline: none;
+  }
+  input:focus { border-color: var(--accent); }
+  .hint { font-size: 12px; color: var(--muted); margin: 6px 0 16px; }
+  .btn {
+    width: 100%; padding: 13px; border: 0; border-radius: 10px; cursor: pointer;
+    background: var(--accent); color: #fff; font-size: 15px; font-weight: 600;
+  }
+  .btn:disabled { opacity: .5; cursor: not-allowed; }
+  .btn.ghost { background: transparent; border: 1px solid var(--line); color: var(--muted); margin-top: 10px; }
+  .hidden { display: none; }
+  .result { text-align: center; }
+  .code {
+    font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 34px; font-weight: 700;
+    letter-spacing: 4px; padding: 16px; border: 1px dashed var(--accent);
+    border-radius: 12px; margin: 8px 0 12px; user-select: all;
+  }
+  .qr { background: #fff; padding: 10px; border-radius: 12px; display: inline-block; }
+  .qr img { display: block; width: 260px; height: 260px; }
+  .steps { text-align: left; color: var(--muted); font-size: 13px; line-height: 1.6; margin: 14px 0 0; padding-left: 18px; }
+  .status { margin-top: 14px; font-size: 14px; color: var(--muted); }
+  .ok { color: var(--ok); font-weight: 600; font-size: 18px; }
+  .err { color: #ff6b6b; font-size: 14px; margin-top: 12px; text-align: center; }
+  .spinner {
+    width: 22px; height: 22px; border: 3px solid var(--line); border-top-color: var(--accent);
+    border-radius: 50%; animation: spin 1s linear infinite; margin: 10px auto;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>🔥 DEXTER MODZ</h1>
+  <p class="sub">Vincula tu WhatsApp con el bot</p>
+
+  <!-- FORMULARIO -->
+  <div id="formView">
+    <div class="tabs">
+      <button class="tab active" data-mode="code">🔐 Código</button>
+      <button class="tab" data-mode="qr">📷 QR</button>
+    </div>
+
+    <div id="phoneBox">
+      <label for="phone">Número con código de país</label>
+      <input id="phone" type="tel" inputmode="numeric" placeholder="521234567890" autocomplete="tel">
+      <div class="hint">Sin “+” ni espacios. Ejemplo México: 521234567890</div>
+    </div>
+
+    <button id="startBtn" class="btn">Generar código</button>
+    <div id="formError" class="err hidden"></div>
+  </div>
+
+  <!-- RESULTADO -->
+  <div id="resultView" class="result hidden">
+    <div id="loading"><div class="spinner"></div><div class="status">Preparando vinculación…</div></div>
+
+    <div id="codeBox" class="hidden">
+      <div class="status">Tu código de vinculación:</div>
+      <div id="codeText" class="code">----</div>
+      <button id="copyBtn" class="btn ghost" style="margin-top:0">Copiar código</button>
+      <ol class="steps">
+        <li>Abre WhatsApp en tu teléfono.</li>
+        <li>Ve a <b>Dispositivos vinculados</b>.</li>
+        <li>Toca <b>Vincular con número de teléfono</b>.</li>
+        <li>Escribe el código mostrado arriba.</li>
+      </ol>
+    </div>
+
+    <div id="qrBox" class="hidden">
+      <div class="qr"><img id="qrImg" alt="Código QR"></div>
+      <ol class="steps">
+        <li>Abre WhatsApp en tu teléfono.</li>
+        <li>Ve a <b>Dispositivos vinculados</b>.</li>
+        <li>Toca <b>Vincular dispositivo</b> y escanea el QR.</li>
+      </ol>
+      <div class="hint">El QR se renueva solo cada pocos segundos.</div>
+    </div>
+
+    <div id="okBox" class="hidden">
+      <div class="ok">✅ ¡Bot conectado!</div>
+      <div id="okNumber" class="status"></div>
+      <div class="status">Prueba enviando <b>!ping</b> o <b>!menu</b> desde WhatsApp.</div>
+      <button id="logoutBtn" class="btn ghost">Desvincular bot</button>
+    </div>
+
+    <div id="resError" class="err hidden"></div>
+    <button id="backBtn" class="btn ghost">Cancelar</button>
+  </div>
+</div>
+
+<script>
+(() => {
+  const $ = id => document.getElementById(id);
+  let mode = "code";
+  let sessionId = null;
+  let timer = null;
+
+  const show = (el, on) => $(el).classList.toggle("hidden", !on);
+
+  document.querySelectorAll(".tab").forEach(btn => {
+    btn.addEventListener("click", () => {
+      mode = btn.dataset.mode;
+      document.querySelectorAll(".tab").forEach(b => b.classList.toggle("active", b === btn));
+      show("phoneBox", mode === "code");
+      $("startBtn").textContent = mode === "code" ? "Generar código" : "Generar QR";
+      show("formError", false);
+    });
+  });
+
+  function resetView() {
+    clearInterval(timer);
+    timer = null;
+    sessionId = null;
+    sessionStorage.removeItem("dexterSession");
+    show("resultView", false);
+    show("formView", true);
+    $("startBtn").disabled = false;
+  }
+
+  function showPanels({ loading = false, code = false, qr = false, ok = false }) {
+    show("loading", loading);
+    show("codeBox", code);
+    show("qrBox", qr);
+    show("okBox", ok);
+  }
+
+  async function poll() {
+    if (!sessionId) return;
+    try {
+      const r = await fetch("/api/status/" + sessionId);
+      if (r.status === 404) {
+        show("resError", true);
+        $("resError").textContent = "La sesión expiró. Genera una nueva.";
+        showPanels({});
+        clearInterval(timer);
+        sessionStorage.removeItem("dexterSession");
+        return;
+      }
+      const d = await r.json();
+
+      if (d.status === "error") {
+        showPanels({});
+        show("resError", true);
+        $("resError").textContent = d.error || "Error de vinculación.";
+        clearInterval(timer);
+        return;
+      }
+
+      show("resError", false);
+
+      if (d.status === "connected") {
+        showPanels({ ok: true });
+        $("okNumber").textContent = d.number ? "Número: +" + d.number : "";
+        show("backBtn", false);
+        clearInterval(timer);
+      } else if (d.status === "linking") {
+        showPanels({ loading: true });
+      } else if (d.mode === "code" && d.code) {
+        $("codeText").textContent = d.code;
+        showPanels({ code: true });
+      } else if (d.mode === "qr" && d.qr) {
+        $("qrImg").src = d.qr;
+        showPanels({ qr: true });
+      } else {
+        showPanels({ loading: true });
+      }
+    } catch (_) { /* reintenta en el siguiente ciclo */ }
+  }
+
+  function startPolling(id) {
+    sessionId = id;
+    sessionStorage.setItem("dexterSession", id);
+    show("formView", false);
+    show("resultView", true);
+    show("resError", false);
+    show("backBtn", true);
+    showPanels({ loading: true });
+    clearInterval(timer);
+    poll();
+    timer = setInterval(poll, 2000);
+  }
+
+  $("startBtn").addEventListener("click", async () => {
+    show("formError", false);
+    const phone = $("phone").value.replace(/\D/g, "");
+
+    if (mode === "code" && !/^[1-9]\d{9,14}$/.test(phone)) {
+      $("formError").textContent = "Escribe un número válido con código de país.";
+      show("formError", true);
+      return;
+    }
+
+    $("startBtn").disabled = true;
+    try {
+      const r = await fetch("/api/pair", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mode, phone })
+      });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || "Error al iniciar.");
+      startPolling(d.id);
+    } catch (e) {
+      $("formError").textContent = e.message;
+      show("formError", true);
+      $("startBtn").disabled = false;
+    }
+  });
+
+  $("copyBtn").addEventListener("click", async () => {
+    const text = $("codeText").textContent.replace(/-/g, "");
+    try {
+      await navigator.clipboard.writeText(text);
+      $("copyBtn").textContent = "¡Copiado!";
+    } catch (_) {
+      $("copyBtn").textContent = "Selecciona y copia manualmente";
+    }
+    setTimeout(() => ($("copyBtn").textContent = "Copiar código"), 2000);
+  });
+
+  $("backBtn").addEventListener("click", async () => {
+    if (sessionId) { try { await fetch("/api/session/" + sessionId, { method: "DELETE" }); } catch (_) {} }
+    resetView();
+  });
+
+  $("logoutBtn").addEventListener("click", async () => {
+    if (sessionId) { try { await fetch("/api/session/" + sessionId, { method: "DELETE" }); } catch (_) {} }
+    resetView();
+  });
+
+  // Retoma la sesión si el usuario recarga la página.
+  const saved = sessionStorage.getItem("dexterSession");
+  if (saved) startPolling(saved);
+})();
+</script>
+</body>
+</html>

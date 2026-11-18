@@ -1,0 +1,6 @@
+node_modules/
+web_sessions/
+session/
+subbot_session/
+cookies.txt
+*.log
