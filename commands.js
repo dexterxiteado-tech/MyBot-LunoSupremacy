@@ -596,6 +596,416 @@ const DATA_DIR = process.env.DATA_DIR ||
   (process.env.SESSIONS_DIR ? path.dirname(process.env.SESSIONS_DIR) : path.join(__dirname, "data"));
 try { fs.mkdirSync(DATA_DIR, { recursive: true }); } catch (_) {}
 
+
+// ======================================================
+// DESCARGAS CON YT-DLP (se descarga solo, no requiere Docker)
+// ======================================================
+
+const DOWNLOAD_TIMEOUT = 12 * 60 * 1000;
+const activeDownloads = new Set();
+
+const YTDLP_LOCAL = path.join(os.tmpdir(), "dexter-bin", "yt-dlp");
+let YTDLP_BIN = process.env.YTDLP_PATH || "yt-dlp";
+
+async function ensureYtDlp() {
+  if (process.env.YTDLP_PATH) return;
+  try {
+    await runProcess("yt-dlp", ["--version"], 15000);   // ¿hay uno instalado?
+    YTDLP_BIN = "yt-dlp";
+    return;
+  } catch (_) {}
+
+  try {
+    fs.mkdirSync(path.dirname(YTDLP_LOCAL), { recursive: true });
+    const asset = process.arch === "arm64" ? "yt-dlp_linux_aarch64" : "yt-dlp_linux";
+    const res = await fetch(
+      `https://github.com/yt-dlp/yt-dlp/releases/latest/download/${asset}`,
+      { redirect: "follow", signal: AbortSignal.timeout(180000) }
+    );
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    const buf = Buffer.from(await res.arrayBuffer());
+    if (buf.length < 1000000) throw new Error("descarga incompleta");
+    const tmp = YTDLP_LOCAL + ".tmp";
+    fs.writeFileSync(tmp, buf, { mode: 0o755 });
+    fs.renameSync(tmp, YTDLP_LOCAL);
+    log("[YTDLP] Instalado:", formatBytes(buf.length));
+  } catch (e) {
+    log("[YTDLP] No se pudo descargar:", e.message);
+  }
+  if (fs.existsSync(YTDLP_LOCAL)) YTDLP_BIN = YTDLP_LOCAL;
+}
+
+function getYtDlpCommand() {
+  return YTDLP_BIN;
+}
+
+let ytDlpReady = ensureYtDlp().catch(e => log("[YTDLP]", e.message));
+// Se actualiza cada 24 h para seguir el ritmo de cambios de YouTube.
+setInterval(() => {
+  if (process.env.YTDLP_PATH) return;
+  ytDlpReady = ensureYtDlp().catch(e => log("[YTDLP]", e.message));
+}, 24 * 60 * 60 * 1000).unref();
+
+const ALLOWED_MEDIA_DOMAINS = [
+  "youtube.com",
+  "youtu.be",
+  "tiktok.com",
+  "instagram.com",
+  "facebook.com",
+  "fb.watch",
+  "x.com",
+  "twitter.com",
+  "vimeo.com",
+  "reddit.com",
+  "redd.it"
+];
+
+function getUrlHost(value) {
+  try {
+    const parsed = new URL(value);
+
+    if (!["http:", "https:"].includes(parsed.protocol)) return null;
+
+    return parsed.hostname.toLowerCase().replace(/^www\./, "");
+  } catch (_) {
+    return null;
+  }
+}
+
+function isAllowedMediaUrl(value) {
+  const host = getUrlHost(value);
+  if (!host) return false;
+
+  return ALLOWED_MEDIA_DOMAINS.some(domain =>
+    host === domain || host.endsWith(`.${domain}`)
+  );
+}
+
+function isYoutubeUrl(value) {
+  const host = getUrlHost(value);
+  if (!host) return false;
+
+  return (
+    host === "youtube.com" ||
+    host.endsWith(".youtube.com") ||
+    host === "youtu.be"
+  );
+}
+
+function hostMatches(value, domain) {
+  const host = getUrlHost(value);
+  return !!host && (host === domain || host.endsWith(`.${domain}`));
+}
+
+
+function formatVideoDuration(seconds) {
+  if (!Number.isFinite(Number(seconds))) return "No disponible";
+  const n = Math.max(0, Math.floor(Number(seconds)));
+  const h = Math.floor(n / 3600), m = Math.floor((n % 3600) / 60), sec = n % 60;
+  return h ? `${h}:${String(m).padStart(2,"0")}:${String(sec).padStart(2,"0")}` : `${m}:${String(sec).padStart(2,"0")}`;
+}
+function getSourceLabel(command, url) {
+  if (command === "facebook" || hostMatches(url, "facebook.com") || hostMatches(url, "fb.watch")) return "FACEBOOK";
+  if (command === "ytmp4" || command === "play" || isYoutubeUrl(url)) return "YOUTUBE";
+  if (command === "tiktok" || hostMatches(url, "tiktok.com")) return "TIKTOK";
+  if (command === "instagram" || hostMatches(url, "instagram.com")) return "INSTAGRAM";
+  return String(command || "WEB").toUpperCase();
+}
+
+async function downloadAndSend(sock, jid, url, mode, sourceCommand) {
+  await ytDlpReady;
+  if (activeDownloads.has(jid)) {
+    await sock.sendMessage(jid, {
+      text: "⏳ Ya hay una descarga en proceso en este chat."
+    });
+    return;
+  }
+
+  const playIsUrl = sourceCommand === "play" && !!getUrlHost(url);
+  if (sourceCommand === "play") {
+    if (playIsUrl && !isYoutubeUrl(url)) {
+      await sock.sendMessage(jid, { text: "❌ .play acepta enlaces de YouTube o el nombre de una canción." });
+      return;
+    }
+    mode = "audio";
+  } else if (!isAllowedMediaUrl(url)) {
+    await sock.sendMessage(jid, { text: "❌ Sitio no compatible o URL no válida." });
+    return;
+  }
+
+  if (sourceCommand === "ytmp4" && !isYoutubeUrl(url)) {
+    await sock.sendMessage(jid, { text: "❌ .ytmp4 solo acepta enlaces de YouTube." });
+    return;
+  }
+
+  if (
+    sourceCommand === "tiktok" &&
+    !hostMatches(url, "tiktok.com")
+  ) {
+    await sock.sendMessage(jid, {
+      text: "❌ Ese enlace no parece ser de TikTok."
+    });
+    return;
+  }
+
+  if (
+    sourceCommand === "instagram" &&
+    !hostMatches(url, "instagram.com")
+  ) {
+    await sock.sendMessage(jid, {
+      text: "❌ Ese enlace no parece ser de Instagram."
+    });
+    return;
+  }
+
+  if (
+    sourceCommand === "facebook" &&
+    !(
+      hostMatches(url, "facebook.com") ||
+      hostMatches(url, "fb.watch")
+    )
+  ) {
+    await sock.sendMessage(jid, {
+      text: "❌ Ese enlace no parece ser de Facebook."
+    });
+    return;
+  }
+
+  activeDownloads.add(jid);
+
+  let jobDir = null;
+  let savedPath = null;
+
+  try {
+    jobDir = fs.mkdtempSync(path.join(TEMP_DIR, "download-"));
+
+    await sock.sendMessage(jid, {
+      text:
+        "╔════════════════════╗\n" +
+        "       DEXTER MODZ\n" +
+        "╚════════════════════╝\n\n" +
+        "⏳ Procesando descarga...\n" +
+        `📁 Tipo: ${mode.toUpperCase()}\n` +
+        `🌐 Sitio: ${sourceCommand.toUpperCase()}\n\n` +
+        "Espera un momento."
+    });
+
+    let videoInfo = null;
+    if (mode === "video") {
+      try {
+        const info = await runProcess(getYtDlpCommand(), [
+          "--no-warnings", "--no-playlist", "--skip-download", "--dump-single-json", url
+        ], 90000);
+        videoInfo = JSON.parse(info.stdout.trim());
+      } catch (e) { log("[YTDLP INFO]", e.message); }
+    }
+
+    const outputTemplate = path.join(
+      jobDir,
+      "%(title).70s_%(id)s.%(ext)s"
+    );
+
+    const args = [
+      "--no-playlist",
+      "--no-progress",
+      "--no-colors",
+      "--no-warnings",
+      "--no-write-info-json",
+      "--no-write-thumbnail",
+      "--no-write-subs",
+      "--no-write-auto-subs",
+      "--restrict-filenames",
+      "-o",
+      outputTemplate,
+      "--print",
+      "after_move:filepath",
+      "--no-simulate"
+    ];
+
+    const cookieFile = [
+      path.join(DATA_DIR, "cookies.txt"),
+      path.join(__dirname, "cookies.txt")
+    ].find(p => fs.existsSync(p));
+    if (cookieFile) {
+      args.push("--cookies", cookieFile);
+      log("[YTDLP] Cookies activadas.");
+    }
+
+    // Límites para proteger el servidor: máx. 30 min y ~80 MB, sin directos.
+    args.push(
+      "--max-filesize", "80M",
+      "--match-filter", "!is_live & duration<=?1800"
+    );
+    if (path.isAbsolute(FFMPEG)) args.push("--ffmpeg-location", FFMPEG);
+
+    if (mode === "audio") {
+      args.push(
+        "-x",
+        "--audio-format", "mp3",
+        "--audio-quality", "5"
+      );
+    } else {
+      args.push(
+        "-f",
+        "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/b",
+        "--merge-output-format",
+        "mp4"
+      );
+    }
+
+    const input = sourceCommand === "play" && !playIsUrl
+      ? `ytsearch1:${url}`
+      : url;
+    args.push(input);
+
+    log("[YTDLP] Descargando:", sourceCommand, mode, playIsUrl ? "URL" : "BÚSQUEDA");
+
+    const result = await runProcess(
+      getYtDlpCommand(),
+      args,
+      DOWNLOAD_TIMEOUT
+    );
+
+    const lines = result.stdout
+      .split(/\r?\n/)
+      .map(line => line.trim())
+      .filter(Boolean);
+
+    const downloadedPath = lines[lines.length - 1];
+
+    if (!downloadedPath || !fs.existsSync(downloadedPath)) {
+      throw new Error("No se descargó nada: el video es muy largo (máx. 30 min), es un directo o pesa demasiado.");
+    }
+
+    const originalStats = fs.statSync(downloadedPath);
+
+    if (!originalStats.isFile() || originalStats.size <= 0) {
+      throw new Error("El archivo descargado está vacío.");
+    }
+
+    // Archivo temporal: se envía directamente a WhatsApp y luego se elimina.
+    savedPath = downloadedPath;
+    const stats = fs.statSync(savedPath);
+    const extension = path.extname(savedPath).toLowerCase();
+    const mimeTypes = {
+      ".mp4": "video/mp4",
+      ".webm": "video/webm",
+      ".mkv": "video/x-matroska",
+      ".mp3": "audio/mpeg",
+      ".m4a": "audio/mp4",
+      ".opus": "audio/ogg",
+      ".ogg": "audio/ogg"
+    };
+
+    log(
+      "[YTDLP] Temporal listo para enviar:",
+      savedPath,
+      formatBytes(stats.size)
+    );
+
+    if (
+      mode === "audio" &&
+      extension === ".mp3" &&
+      stats.size <= 64 * 1024 * 1024
+    ) {
+      await sock.sendMessage(jid, {
+        audio: { url: savedPath },
+        mimetype: "audio/mpeg",
+        ptt: false
+      });
+    } else if (
+      mode === "video" &&
+      extension === ".mp4" &&
+      stats.size <= 64 * 1024 * 1024
+    ) {
+      await sock.sendMessage(jid, {
+        video: { url: savedPath },
+        mimetype: "video/mp4",
+        caption: `🔥 DEXTER MODZ\n\n🎬 Nombre: ${videoInfo?.title || path.basename(savedPath, extension)}\n⏱️ Duración: ${formatVideoDuration(videoInfo?.duration)}\n📥 Proveniente: ${getSourceLabel(sourceCommand, url)}\n\n👤 by Dxx Modz Sk`
+      });
+    } else {
+      await sock.sendMessage(jid, {
+        document: { url: savedPath },
+        mimetype: mimeTypes[extension] || "application/octet-stream",
+        fileName: path.basename(savedPath),
+        caption: mode === "video" ? `🔥 DEXTER MODZ\n\n🎬 Nombre: ${videoInfo?.title || path.basename(savedPath, extension)}\n⏱️ Duración: ${formatVideoDuration(videoInfo?.duration)}\n📥 Proveniente: ${getSourceLabel(sourceCommand, url)}\n\n👤 by Dxx Modz Sk` : "🔥 DEXTER MODZ"
+      });
+    }
+
+    await sock.sendMessage(jid, {
+      text:
+        "✅ Archivo enviado directamente a WhatsApp.\n" +
+        `📦 Tamaño: ${formatBytes(stats.size)}\n` +
+        "🧹 Archivo temporal eliminado al terminar."
+    });
+
+  } catch (error) {
+    const message = error.message || String(error);
+    const lower = message.toLowerCase();
+
+    log("[ERROR YTDLP]", message);
+
+    let response;
+
+    if (lower.includes("no está instalado") || lower.includes("enoent")) {
+      response =
+        "❌ No se encontró yt-dlp.\n" +
+        "Comprueba: yt-dlp --version";
+    } else if (
+      lower.includes("sign in to confirm") ||
+      lower.includes("confirm you're not a bot") ||
+      lower.includes("http error 429") ||
+      lower.includes("login required") ||
+      lower.includes("cookies")
+    ) {
+      response =
+        "⚠️ YouTube o el sitio solicita verificación.\n\n" +
+        "Esto pasa seguido en servidores. Se puede probar con un cookies.txt en la raíz del proyecto.";
+    } else if (
+      lower.includes("private video") ||
+      lower.includes("video unavailable") ||
+      lower.includes("has been removed")
+    ) {
+      response =
+        "❌ El contenido es privado, fue eliminado o no está disponible.";
+    } else if (
+      lower.includes("requested format is not available")
+    ) {
+      response =
+        "❌ No se encontró un formato compatible.";
+    } else if (
+      lower.includes("ffmpeg") ||
+      lower.includes("ffprobe")
+    ) {
+      response =
+        "❌ Error de FFmpeg. Comprueba: command -v ffmpeg";
+    } else if (lower.includes("tiempo de espera")) {
+      response = "⏱️ La descarga tardó demasiado y fue cancelada.";
+    } else {
+      response = `❌ Error de descarga:\n\n${message.slice(-600)}`;
+    }
+
+
+    try {
+      await sock.sendMessage(jid, { text: response });
+    } catch (sendError) {
+      log("[ERROR AVISANDO DESCARGA]", sendError.message);
+    }
+
+  } finally {
+    activeDownloads.delete(jid);
+
+    if (jobDir && fs.existsSync(jobDir)) {
+      try {
+        fs.rmSync(jobDir, { recursive: true, force: true });
+      } catch (error) {
+        log("[ERROR LIMPIANDO TEMP]", error.message);
+      }
+    }
+  }
+}
+
+
 // ======================================================
 // UTILIDADES DE JID / GRUPOS
 // ======================================================
@@ -990,6 +1400,7 @@ function getMenu() {
   });
   const cmds = list => list.map(c => `> *${c}*`).join("\n");
   const sections = [
+    ["DESCARGAS", [".play", ".ytmp4", ".fb", ".ig", ".tiktok"]],
     ["STICKERS", [".s", ".toimg", ".tag"]],
     ["TEXTOS", [".negrita", ".cursiva", ".tachado", ".subrayada"]],
     ["JUEGOS", [".ahorcado", ".v/f"]],
@@ -1046,8 +1457,7 @@ const lastCommandAt = new Map();
 const pendingJobs = new Set();
 const COOLDOWN_MS = 1500;
 const NOT_AVAILABLE = new Set([
-  "play", "ytmp4", "fb", "ig", "tiktok", "tiktoksearch", "dl", "google",
-  "ia", "deepseek", "chatgpt"
+  "tiktoksearch", "google", "ia", "deepseek", "chatgpt"
 ]);
 
 async function heavy(sock, jid, task) {
@@ -1112,6 +1522,25 @@ async function handleMessage(sock, msg) {
       return heavy(sock, jid, () => handleToAudio(sock, jid, msg.message));
     case cmd === "qr":
       return handleQR(sock, jid, args.slice(0, 1000));
+
+    // Descargas
+    case cmd === "play": {
+      if (!args) {
+        return void await sock.sendMessage(jid, {
+          text: "🎵 Uso:\n.play nombre de canción\n.play enlace de YouTube"
+        });
+      }
+      return heavy(sock, jid, () =>
+        downloadAndSend(sock, jid, args.slice(0, 300), "audio", "play"));
+    }
+    case ["ytmp4", "fb", "ig", "tiktok"].includes(cmd): {
+      const source = { ytmp4: "ytmp4", fb: "facebook", ig: "instagram", tiktok: "tiktok" }[cmd];
+      const url = args.split(/\s+/)[0];
+      if (!/^https?:\/\/\S+$/i.test(url)) {
+        return void await sock.sendMessage(jid, { text: `📥 Uso: .${cmd} enlace` });
+      }
+      return heavy(sock, jid, () => downloadAndSend(sock, jid, url, "video", source));
+    }
 
     // Textos
     case ["negrita", "cursiva", "tachado", "subrayada"].includes(cmd):
