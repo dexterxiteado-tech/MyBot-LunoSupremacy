@@ -888,9 +888,16 @@ async function downloadAndSend(sock, jid, url, mode, sourceCommand) {
       );
     }
 
-    const input = sourceCommand === "play" && !playIsUrl
+    // Búsqueda por nombre: primero se intenta la página de resultados de YouTube
+    // (suele bloquearse menos que la API interna que usa yt-dlp para buscar).
+    let searchTarget = null;
+    if (sourceCommand === "play" && !playIsUrl) {
+      try { searchTarget = await searchYoutubeUrl(url); }
+      catch (e) { log("[BUSQUEDA]", e.message); }
+    }
+    const input = searchTarget || (sourceCommand === "play" && !playIsUrl
       ? `ytsearch1:${url}`
-      : url;
+      : url);
     args.push(input);
 
     log("[YTDLP] Descargando:", sourceCommand, mode, playIsUrl ? "URL" : "BÚSQUEDA");
@@ -997,6 +1004,10 @@ async function downloadAndSend(sock, jid, url, mode, sourceCommand) {
       response =
         "⚠️ YouTube o el sitio solicita verificación.\n\n" +
         "Esto pasa seguido en servidores. Se puede probar con un cookies.txt en la raíz del proyecto.";
+    } else if (lower.includes("http error 403") || lower.includes("403: forbidden")) {
+      response =
+        "⚠️ YouTube bloqueó la búsqueda desde el servidor.\n\n" +
+        "Prueba con el enlace del video:\n.play https://youtu.be/...";
     } else if (
       lower.includes("private video") ||
       lower.includes("video unavailable") ||
