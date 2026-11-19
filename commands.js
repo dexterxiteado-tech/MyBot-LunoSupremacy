@@ -3,7 +3,7 @@
 // Multimedia con ffmpeg-static: no requiere Docker.
 // ======================================================
 
-const { spawn } = require("child_process");
+const { spawn, spawnSync } = require("child_process");
 const { downloadContentFromMessage } = require("@whiskeysockets/baileys");
 const fs = require("fs");
 const os = require("os");
@@ -12,9 +12,14 @@ const path = require("path");
 let QRCode = null;
 try { QRCode = require("qrcode"); } catch (_) {}
 
-// ffmpeg incluido por npm (ffmpeg-static); si falla, usa el del sistema.
+// ffmpeg: usa el del sistema si existe (Termux, VPS); si no, el de ffmpeg-static (Render).
 let FFMPEG = "ffmpeg";
-try { FFMPEG = require("ffmpeg-static") || "ffmpeg"; } catch (_) {}
+try {
+  const sys = spawnSync("ffmpeg", ["-version"], { stdio: "ignore", timeout: 10000 });
+  if (sys.status !== 0) FFMPEG = require("ffmpeg-static") || "ffmpeg";
+} catch (_) {
+  try { FFMPEG = require("ffmpeg-static") || "ffmpeg"; } catch (_) {}
+}
 
 const TEMP_DIR = path.join(os.tmpdir(), "dexter-modz-temp");
 const MAX_MEDIA_DOWNLOAD = 50 * 1024 * 1024;
@@ -791,6 +796,27 @@ async function downloadAndSend(sock, jid, url, mode, sourceCommand) {
     });
 
     let videoInfo = null;
+    let downloadedPath = null;
+
+    // 1) API de terceros (si está configurada)
+    if (DL_API_URL || DL_YT_API_URL) {
+      try {
+        let target = url;
+        if (sourceCommand === "play" && !playIsUrl) {
+          target = await searchYoutubeUrl(url);
+          if (!target) throw new Error("no se pudo buscar por nombre desde el servidor");
+        }
+        const r = await downloadViaApi(target, mode, jobDir);
+        downloadedPath = r.path;
+        videoInfo = { title: r.title || undefined, duration: r.duration };
+        log("[API] Descarga lista:", sourceCommand, mode);
+      } catch (e) {
+        log("[API] Falló:", e.message);
+      }
+    }
+
+    // 2) yt-dlp (si no hubo API o falló)
+    if (!downloadedPath) {
     if (mode === "video") {
       try {
         const info = await runProcess(getYtDlpCommand(), [
@@ -822,10 +848,19 @@ async function downloadAndSend(sock, jid, url, mode, sourceCommand) {
       "--no-simulate"
     ];
 
+    // Cookies: variable de entorno COOKIES_TXT (recomendado) o archivo cookies.txt.
+    const envCookies = path.join(os.tmpdir(), "dexter-bin", "cookies.txt");
+    if (process.env.COOKIES_TXT) {
+      try {
+        fs.mkdirSync(path.dirname(envCookies), { recursive: true });
+        fs.writeFileSync(envCookies, process.env.COOKIES_TXT.replace(/\\n/g, "\n"), { mode: 0o600 });
+      } catch (e) { log("[COOKIES]", e.message); }
+    }
     const cookieFile = [
+      process.env.COOKIES_TXT ? envCookies : null,
       path.join(DATA_DIR, "cookies.txt"),
       path.join(__dirname, "cookies.txt")
-    ].find(p => fs.existsSync(p));
+    ].filter(Boolean).find(p => fs.existsSync(p));
     if (cookieFile) {
       args.push("--cookies", cookieFile);
       log("[YTDLP] Cookies activadas.");
@@ -871,7 +906,8 @@ async function downloadAndSend(sock, jid, url, mode, sourceCommand) {
       .map(line => line.trim())
       .filter(Boolean);
 
-    const downloadedPath = lines[lines.length - 1];
+    downloadedPath = lines[lines.length - 1];
+    }
 
     if (!downloadedPath || !fs.existsSync(downloadedPath)) {
       throw new Error("No se descargó nada: el video es muy largo (máx. 30 min), es un directo o pesa demasiado.");
@@ -1005,6 +1041,174 @@ async function downloadAndSend(sock, jid, url, mode, sourceCommand) {
   }
 }
 
+
+
+// ======================================================
+// DESCARGAS VIA API DE TERCEROS (opcional, para evitar el bloqueo de YouTube)
+// Variables de entorno:
+//   DL_API_URL      URL de la API con {url} (o {id} para el ID de YouTube)
+//   DL_YT_API_URL   (opcional) endpoint distinto solo para YouTube
+//   DL_API_KEY      clave de RapidAPI (cabeceras x-rapidapi-* automáticas)
+//   DL_API_HEADERS  (opcional) cabeceras extra en JSON
+//   DL_API_METHOD   GET (por defecto) o POST
+//   DL_API_BODY     (opcional, POST) cuerpo JSON con {url} o {id}
+// ======================================================
+
+const DL_API_URL = process.env.DL_API_URL || "";
+const DL_YT_API_URL = process.env.DL_YT_API_URL || "";   // opcional: endpoint solo para YouTube
+const DL_API_KEY = process.env.DL_API_KEY || "";
+const DL_API_METHOD = (process.env.DL_API_METHOD || "GET").toUpperCase();
+const DL_API_BODY = process.env.DL_API_BODY || "";
+const API_MAX_BYTES = 80 * 1024 * 1024;
+const BROWSER_UA = "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 Chrome/124.0.0.0 Mobile Safari/537.36";
+
+function youtubeId(value) {
+  try {
+    const u = new URL(value);
+    const host = u.hostname.replace(/^www\./, "");
+    if (host === "youtu.be") return u.pathname.slice(1, 12);
+    if (u.searchParams.get("v")) return u.searchParams.get("v").slice(0, 11);
+    const m = u.pathname.match(/\/(?:shorts|embed|live)\/([\w-]{11})/);
+    return m ? m[1] : "";
+  } catch (_) { return ""; }
+}
+
+function fillTemplate(template, url, asJson = false) {
+  const enc = asJson ? v => JSON.stringify(v).slice(1, -1) : encodeURIComponent;
+  return template.replace(/\{url\}/g, enc(url)).replace(/\{id\}/g, enc(youtubeId(url)));
+}
+
+function apiHeaders(template) {
+  const h = { Accept: "application/json", "User-Agent": BROWSER_UA };
+  try {
+    const host = new URL(fillTemplate(template, "x")).hostname;
+    if (DL_API_KEY && /rapidapi\.com$/i.test(host)) {
+      h["x-rapidapi-key"] = DL_API_KEY;
+      h["x-rapidapi-host"] = host;
+    }
+  } catch (_) {}
+  if (process.env.DL_API_HEADERS) {
+    try { Object.assign(h, JSON.parse(process.env.DL_API_HEADERS)); }
+    catch (_) { log("[API] DL_API_HEADERS no es JSON válido."); }
+  }
+  return h;
+}
+
+function collectUrls(node, key = "", out = []) {
+  if (typeof node === "string") {
+    if (/^https?:\/\//i.test(node)) out.push({ key: key.toLowerCase(), url: node });
+  } else if (Array.isArray(node)) {
+    node.forEach((v, i) => collectUrls(v, key + "." + i, out));
+  } else if (node && typeof node === "object") {
+    for (const [k, v] of Object.entries(node)) collectUrls(v, key + "." + k, out);
+  }
+  return out;
+}
+
+function pickMediaUrl(json, mode) {
+  const bad = /(thumb|cover|image|avatar|poster|preview|icon|logo|author|profile|watermark)/;
+  const imgExt = /\.(jpe?g|png|webp|gif)(\?|$)/i;
+  let list = collectUrls(json).filter(c => !bad.test(c.key) && !imgExt.test(c.url));
+  const audioKey = /(audio|mp3|music|sound)/;
+  if (mode === "video") {
+    const noAudio = list.filter(c => !audioKey.test(c.key));
+    if (noAudio.length) list = noAudio;
+  }
+  const priorities = mode === "audio"
+    ? [/mp3/, /audio/, /music|sound/, /link|download|url|dl/]
+    : [/hd/, /nowm|nowatermark|no_watermark/, /video|mp4/, /play|download|dl|link|url/];
+  for (const re of priorities) {
+    const hit = list.find(c => re.test(c.key));
+    if (hit) return hit.url;
+  }
+  return list[0]?.url || null;
+}
+
+function findTitle(node, depth = 0) {
+  if (!node || typeof node !== "object" || depth > 3) return "";
+  for (const [k, v] of Object.entries(node)) {
+    if (/^(title|name|caption)$/i.test(k) && typeof v === "string" && v.trim()) return v.trim().replace(/\s+/g, " ").slice(0, 80);
+  }
+  for (const v of Object.values(node)) {
+    const t = findTitle(v, depth + 1);
+    if (t) return t;
+  }
+  return "";
+}
+
+function isPrivateHost(host) {
+  if (process.env.DL_ALLOW_PRIVATE) return false;
+  return /^(localhost|0\.0\.0\.0|127\.|10\.|192\.168\.|169\.254\.|172\.(1[6-9]|2\d|3[01])\.|\[?::1)/i.test(host);
+}
+
+async function downloadToFile(fileUrl, dir, mode) {
+  const u = new URL(fileUrl);
+  if (!["http:", "https:"].includes(u.protocol) || isPrivateHost(u.hostname)) {
+    throw new Error("enlace de descarga no permitido");
+  }
+  const res = await fetch(fileUrl, {
+    redirect: "follow",
+    headers: { "User-Agent": BROWSER_UA },
+    signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT)
+  });
+  if (!res.ok || !res.body) throw new Error("el archivo respondió HTTP " + res.status);
+
+  const type = (res.headers.get("content-type") || "").toLowerCase();
+  if (/(json|html|text\/)/.test(type)) throw new Error("la API no devolvió un archivo sino una página");
+  if (Number(res.headers.get("content-length") || 0) > API_MAX_BYTES) throw new Error("archivo demasiado grande");
+
+  const ext = /mpeg|mp3/.test(type) ? ".mp3" : /mp4a|m4a|audio\/mp4/.test(type) ? ".m4a"
+    : /video\/mp4/.test(type) ? ".mp4" : mode === "audio" ? ".mp3" : ".mp4";
+  const filePath = path.join(dir, "api_download" + ext);
+
+  const { Readable, Transform } = require("stream");
+  const { pipeline } = require("stream/promises");
+  let total = 0;
+  const limiter = new Transform({
+    transform(chunk, _enc, cb) {
+      total += chunk.length;
+      if (total > API_MAX_BYTES) cb(new Error("archivo demasiado grande"));
+      else cb(null, chunk);
+    }
+  });
+  await pipeline(Readable.fromWeb(res.body), limiter, fs.createWriteStream(filePath));
+  if (total < 1024) throw new Error("archivo vacío");
+  return filePath;
+}
+
+async function downloadViaApi(targetUrl, mode, dir) {
+  const template = isYoutubeUrl(targetUrl) && DL_YT_API_URL ? DL_YT_API_URL : DL_API_URL;
+  const url = fillTemplate(template, targetUrl);
+  const options = { method: DL_API_METHOD, headers: apiHeaders(template), signal: AbortSignal.timeout(90000) };
+  if (DL_API_METHOD === "POST") {
+    options.headers["Content-Type"] = "application/json";
+    options.body = fillTemplate(DL_API_BODY || '{"url":"{url}"}', targetUrl, true);
+  }
+  const res = await fetch(url, options);
+  const raw = await res.text();
+  if (!res.ok) throw new Error(`la API respondió HTTP ${res.status}`);
+  let json;
+  try { json = JSON.parse(raw); } catch (_) { throw new Error("la API no devolvió JSON"); }
+
+  const mediaUrl = pickMediaUrl(json, mode);
+  if (!mediaUrl) throw new Error("la API no devolvió un enlace de descarga");
+  const filePath = await downloadToFile(mediaUrl, dir, mode);
+  const duration = Number(json.duration ?? json.data?.duration ?? json.result?.duration);
+  return { path: filePath, title: findTitle(json), duration: Number.isFinite(duration) ? duration : undefined };
+}
+
+async function searchYoutubeUrl(query) {
+  const res = await fetch(
+    "https://www.youtube.com/results?hl=es&search_query=" + encodeURIComponent(query),
+    {
+      headers: { "User-Agent": BROWSER_UA, "Accept-Language": "es-MX,es;q=0.9", Cookie: "CONSENT=YES+1" },
+      signal: AbortSignal.timeout(20000)
+    }
+  );
+  if (!res.ok) return null;
+  const m = (await res.text()).match(/"videoId":"([\w-]{11})"/);
+  return m ? "https://www.youtube.com/watch?v=" + m[1] : null;
+}
 
 // ======================================================
 // UTILIDADES DE JID / GRUPOS
