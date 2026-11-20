@@ -25,7 +25,6 @@ Los comandos que necesitan servicios externos/API (por ejemplo IA, Google, Shaza
 
 ### Buscador XVideos (18+)
 
-- `.xvideos término`: busca hasta cinco resultados y devuelve título, duración y enlace.
-- Funciona en chats privados y grupos.
-- Solo envía metadatos y enlaces; no descarga ni reenvía videos ni miniaturas.
+- `.xvideos término`: busca hasta cinco resultados y envía fichas con miniatura (si el proveedor la entrega), título, duración, vistas y botón para abrir la página del vídeo.
+- Funciona en chats privados y grupos. El botón abre el sitio; la descarga, si está disponible, depende de las opciones oficiales del sitio y sus permisos.
 - Requiere Node.js 20.18.1 o superior y `npm install`.

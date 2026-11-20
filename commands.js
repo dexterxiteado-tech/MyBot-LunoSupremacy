@@ -1949,8 +1949,9 @@ async function handleSystemInfo(sock, jid, cmd) {
 }
 
 // ======================================================
-// BUSCADOR XVideos: solo metadatos y enlaces, sin descargar ni
-// mostrar miniaturas. Funciona en chats privados y grupos.
+// BUSCADOR XVideos (18+): fichas con miniatura y enlace.
+// WhatsApp/Baileys no garantiza carruseles nativos en todos
+// los clientes; se envía una ficha por resultado.
 // ======================================================
 async function handleXVideos(sock, jid, query) {
   if (!query || query.length < 2) {
@@ -1962,18 +1963,26 @@ async function handleXVideos(sock, jid, query) {
   try {
     const page = await xvideosClient.videos.search({ k: query.slice(0, 100), page: 1 });
     const videos = Array.isArray(page) ? page : (page?.videos || page?.results || []);
-    if (!videos.length) {
-      return sock.sendMessage(jid, { text: `🔎 No encontré resultados para: ${query}` });
-    }
-    const lines = videos.slice(0, 5).map((video, index) => {
+    if (!videos.length) return sock.sendMessage(jid, { text: `🔎 No encontré resultados para: ${query}` });
+    await sock.sendMessage(jid, { text: `🔞 *XVIDEOS — RESULTADOS*\n🔎 ${query.slice(0,100)}\n📄 ${Math.min(videos.length,5)} resultados\n⚠️ Contenido para mayores de 18 años.` });
+    for (const [index, video] of videos.slice(0, 5).entries()) {
       const title = String(video.title || "Sin título").replace(/[\r\n]+/g, " ").slice(0, 180);
-      const duration = video.duration ? `\n⏱️ ${String(video.duration).slice(0, 30)}` : "";
-      const url = /^https?:\/\//i.test(video.url || "") ? video.url : "";
-      return `${index + 1}. *${title}*${duration}${url ? `\n🔗 ${url}` : ""}`;
-    });
-    return sock.sendMessage(jid, {
-      text: `🔞 *RESULTADOS XVideos*\n🔎 Búsqueda: ${query.slice(0, 100)}\n\n${lines.join("\n\n")}\n\n⚠️ Contenido para adultos. Solo se muestran títulos y enlaces; no se descargan ni se envían videos.`
-    });
+      const url = /^https?:\/\//i.test(video.url || video.link || "") ? (video.url || video.link) : "";
+      const thumb = [video.thumbnail, video.thumb, video.image, video.preview, video.thumbnailUrl].find(v => typeof v === "string" && /^https?:\/\//i.test(v));
+      const duration = video.duration ? String(video.duration).slice(0,30) : "No disponible";
+      const views = video.views ? String(video.views).slice(0,40) : "No disponible";
+      const caption = `╭─「 🔞 *XVIDEOS ${index+1}* 」\n│ 🎬 *${title}*\n│ ⏱️ Duración: ${duration}\n│ 👁️ Vistas: ${views}\n╰──────────────\n⚠️ Solo mayores de 18 años.`;
+      const buttons = url ? [{ index: 1, urlButton: { displayText: "ABRIR / DESCARGAR", url } }] : [];
+      try {
+        if (thumb) {
+          await sock.sendMessage(jid, { image: { url: thumb }, caption, ...(buttons.length ? { templateButtons: buttons } : {}) });
+        } else {
+          await sock.sendMessage(jid, { text: `${caption}\n🔗 ${url || "Enlace no disponible"}`, ...(buttons.length ? { templateButtons: buttons } : {}) });
+        }
+      } catch (_) {
+        await sock.sendMessage(jid, { text: `${caption}\n🔗 ${url || "Enlace no disponible"}` });
+      }
+    }
   } catch (error) {
     log("[XVIDEOS]", error.message);
     return sock.sendMessage(jid, { text: "❌ No pude consultar XVideos. Puede estar bloqueando la conexión o haber cambiado su sitio. Intenta más tarde." });
@@ -1990,8 +1999,7 @@ function getMenu() {
   });
   const cmds = list => list.map(c => `> *${c}*`).join("\n");
   const sections = [
-    ["DESCARGAS", [".play", ".ytmp4", ".fb", ".ig", ".tiktok"]],
-    ["ADULTOS (18+)", [".xvideos"]],
+    ["DESCARGAS", [".play", ".ytmp4", ".fb", ".ig", ".tiktok", ".xvideos"]],
     ["STICKERS", [".s", ".toimg"]],
     ["TEXTOS", [".negrita", ".cursiva", ".tachado", ".subrayada"]],
     ["JUEGOS", [".ahorcado", ".v/f", ".trivia", ".respuesta", ".ppt", ".dados", ".moneda", ".8ball", ".ship"]],
@@ -2148,7 +2156,7 @@ async function handleMessage(sock, msg, ctx = {}) {
     case cmd === "delsesion":
       return handleDelSession(sock, msg, jid, args, ctx);
 
-    // Búsqueda XVideos (privado y grupos; solo títulos y enlaces)
+    // Búsqueda XVideos (18+), disponible en privado y grupos.
     case cmd === "xvideos":
       return heavy(sock, jid, () => handleXVideos(sock, jid, args));
 
