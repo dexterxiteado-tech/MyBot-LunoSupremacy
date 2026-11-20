@@ -1985,23 +1985,25 @@ async function handleXVideos(sock, jid, query) {
         await sock.sendMessage(jid, { text: caption });
       }
       if (url) {
-        const buttons = [
-          { index: 1, quickReplyButton: { displayText: "⬇️ DESCARGAR", id: `.xvdownload ${url}` } },
-          { index: 2, urlButton: { displayText: "🔗 ABRIR VIDEO", url } }
-        ];
+        // Botón de respuesta compatible con el formato clásico de Baileys.
+        // El ID contiene la URL de ESTE resultado, para no mezclar descargas.
         try {
           await sock.sendMessage(jid, {
-            text: `📥 *OPCIONES — XVideos ${index + 1}*`,
-            footer: "Cada botón corresponde a este resultado.",
-            templateButtons: buttons
+            text: `📥 *OPCIONES — XVideos ${index + 1}*\nPulsa el botón para descargar este resultado.`,
+            footer: "DEXTER MODZ • Descarga individual",
+            buttons: [
+              {
+                buttonId: `.xvdownload ${url}`,
+                buttonText: { displayText: "⬇️ DESCARGAR" },
+                type: 1
+              }
+            ],
+            headerType: 1
           });
         } catch (buttonError) {
           log("[XVIDEOS BUTTONS]", buttonError.message);
           await sock.sendMessage(jid, {
-            text: `⬇️ Para descargar este resultado, responde con:
-.xvdownload ${url}
-
-🔗 Abrir: ${url}`
+            text: `⬇️ *DESCARGA MANUAL — XVideos ${index + 1}*\nCopia y envía este comando:\n.xvdownload ${url}\n\n🔗 Abrir: ${url}`
           });
         }
       } else {
