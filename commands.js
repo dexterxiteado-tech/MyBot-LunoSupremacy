@@ -853,7 +853,7 @@ async function downloadAndSend(sock, jid, url, mode, sourceCommand) {
     if (process.env.COOKIES_TXT) {
       try {
         fs.mkdirSync(path.dirname(envCookies), { recursive: true });
-        fs.writeFileSync(envCookies, process.env.COOKIES_TXT.replace(/\\n/g, "\n"), { mode: 0o600 });
+        fs.writeFileSync(envCookies, normalizeCookies(process.env.COOKIES_TXT), { mode: 0o600 });
       } catch (e) { log("[COOKIES]", e.message); }
     }
     const cookieFile = [
@@ -872,6 +872,8 @@ async function downloadAndSend(sock, jid, url, mode, sourceCommand) {
       "--match-filter", "!is_live & duration<=?1800"
     );
     if (path.isAbsolute(FFMPEG)) args.push("--ffmpeg-location", FFMPEG);
+    // yt-dlp reciente necesita un motor de JavaScript para YouTube; se usa Node.
+    if (YTDLP_BIN === YTDLP_LOCAL) args.push("--js-runtimes", "node");
 
     if (mode === "audio") {
       args.push(
@@ -1053,6 +1055,36 @@ async function downloadAndSend(sock, jid, url, mode, sourceCommand) {
 }
 
 
+
+
+// Acepta cookies en formato Netscape o en JSON (Cookie-Editor) y devuelve Netscape.
+function normalizeCookies(raw) {
+  const text = String(raw || "").trim();
+  if (!/^[\[{]/.test(text)) {
+    // Netscape: si al pegar las tabulaciones se volvieron espacios, se reparan.
+    const fixed = text.replace(/\\n/g, "\n").split(/\r?\n/).map(line => {
+      const l = line.trim();
+      if (!l) return "";
+      if (l.startsWith("#") && !l.startsWith("#HttpOnly_")) return l;
+      if (l.includes("\t")) return l;
+      const t = l.split(/\s+/);
+      return t.length >= 7 ? t.slice(0, 6).join("\t") + "\t" + t.slice(6).join(" ") : l;
+    });
+    return "# Netscape HTTP Cookie File\n" + fixed.filter(Boolean).join("\n") + "\n";
+  }
+  let list;
+  try { list = JSON.parse(text); } catch (_) { return text; }
+  if (!Array.isArray(list)) list = list.cookies || [];
+  const lines = ["# Netscape HTTP Cookie File"];
+  for (const c of list) {
+    if (!c || !c.name || !c.domain) continue;
+    const domain = (c.httpOnly ? "#HttpOnly_" : "") + c.domain;
+    const sub = String(c.domain).startsWith(".") ? "TRUE" : "FALSE";
+    const expiry = c.expirationDate ? Math.floor(c.expirationDate) : 0;
+    lines.push([domain, sub, c.path || "/", c.secure ? "TRUE" : "FALSE", expiry, c.name, c.value ?? ""].join("\t"));
+  }
+  return lines.join("\n") + "\n";
+}
 
 // ======================================================
 // DESCARGAS VIA API DE TERCEROS (opcional, para evitar el bloqueo de YouTube)
