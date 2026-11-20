@@ -12,6 +12,9 @@ const path = require("path");
 let QRCode = null;
 try { QRCode = require("qrcode"); } catch (_) {}
 
+let xvideosClient = null;
+try { xvideosClient = require("@rodrigogs/xvideos"); } catch (_) {}
+
 // ffmpeg: usa el del sistema si existe (Termux, VPS); si no, el de ffmpeg-static (Render).
 let FFMPEG = "ffmpeg";
 try {
@@ -1946,6 +1949,38 @@ async function handleSystemInfo(sock, jid, cmd) {
 }
 
 // ======================================================
+// BUSCADOR XVideos: solo metadatos y enlaces, sin descargar ni
+// mostrar miniaturas. Funciona en chats privados y grupos.
+// ======================================================
+async function handleXVideos(sock, jid, query) {
+  if (!query || query.length < 2) {
+    return sock.sendMessage(jid, { text: "🔎 Uso: .xvideos término de búsqueda\nEjemplo: .xvideos búsqueda" });
+  }
+  if (!xvideosClient) {
+    return sock.sendMessage(jid, { text: "⚠️ Falta instalar la dependencia. Ejecuta: npm install @rodrigogs/xvideos" });
+  }
+  try {
+    const page = await xvideosClient.videos.search({ k: query.slice(0, 100), page: 1 });
+    const videos = Array.isArray(page) ? page : (page?.videos || page?.results || []);
+    if (!videos.length) {
+      return sock.sendMessage(jid, { text: `🔎 No encontré resultados para: ${query}` });
+    }
+    const lines = videos.slice(0, 5).map((video, index) => {
+      const title = String(video.title || "Sin título").replace(/[\r\n]+/g, " ").slice(0, 180);
+      const duration = video.duration ? `\n⏱️ ${String(video.duration).slice(0, 30)}` : "";
+      const url = /^https?:\/\//i.test(video.url || "") ? video.url : "";
+      return `${index + 1}. *${title}*${duration}${url ? `\n🔗 ${url}` : ""}`;
+    });
+    return sock.sendMessage(jid, {
+      text: `🔞 *RESULTADOS XVideos*\n🔎 Búsqueda: ${query.slice(0, 100)}\n\n${lines.join("\n\n")}\n\n⚠️ Contenido para adultos. Solo se muestran títulos y enlaces; no se descargan ni se envían videos.`
+    });
+  } catch (error) {
+    log("[XVIDEOS]", error.message);
+    return sock.sendMessage(jid, { text: "❌ No pude consultar XVideos. Puede estar bloqueando la conexión o haber cambiado su sitio. Intenta más tarde." });
+  }
+}
+
+// ======================================================
 // MENU (formato Luno Bot, con "reenviado de canal")
 // ======================================================
 
@@ -1956,6 +1991,7 @@ function getMenu() {
   const cmds = list => list.map(c => `> *${c}*`).join("\n");
   const sections = [
     ["DESCARGAS", [".play", ".ytmp4", ".fb", ".ig", ".tiktok"]],
+    ["ADULTOS (18+)", [".xvideos"]],
     ["STICKERS", [".s", ".toimg"]],
     ["TEXTOS", [".negrita", ".cursiva", ".tachado", ".subrayada"]],
     ["JUEGOS", [".ahorcado", ".v/f", ".trivia", ".respuesta", ".ppt", ".dados", ".moneda", ".8ball", ".ship"]],
@@ -2017,7 +2053,7 @@ const KNOWN_COMMANDS = new Set([
   "negrita", "cursiva", "tachado", "subrayada",
   "ahorcado", "v/f", "vf", "v", "f",
   "abrir", "cerrar", "invocar", "tag", "tagall", "hidetag", "admins", "infogrupo", "warn", "kick", "promote", "demote", "encuesta", "sorteo",
-  "play", "ytmp4", "fb", "ig", "tiktok",
+  "play", "ytmp4", "fb", "ig", "tiktok", "xvideos",
   "hola", "menu", "help", "comandos", "ping", "info", "uptime", "runtime",
   "code", "delsesion", "dados", "moneda", "8ball", "ppt", "ship", "trivia", "respuesta", "mayus", "upper", "minus", "lower", "reverse", "contar", "base64", "random", "status", "ram", "disk", "version", "changelog"
 ]);
@@ -2111,6 +2147,10 @@ async function handleMessage(sock, msg, ctx = {}) {
       return handleSubCode(sock, msg, jid, args, ctx);
     case cmd === "delsesion":
       return handleDelSession(sock, msg, jid, args, ctx);
+
+    // Búsqueda XVideos (privado y grupos; solo títulos y enlaces)
+    case cmd === "xvideos":
+      return heavy(sock, jid, () => handleXVideos(sock, jid, args));
 
     // Descargas
     case cmd === "play": {

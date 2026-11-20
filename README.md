@@ -21,3 +21,11 @@ Requiere Node.js 20 o superior. FFmpeg es recomendado para conversiones multimed
 Los comandos de administración de grupos requieren los permisos correspondientes y, para expulsar/promover/degradar, que el bot sea administrador. `.warn` conserva el contador solo mientras el proceso está activo.
 
 Los comandos que necesitan servicios externos/API (por ejemplo IA, Google, Shazam o quitar fondos mediante servicios online) no se activan en esta edición.
+
+
+### Buscador XVideos (18+)
+
+- `.xvideos término`: busca hasta cinco resultados y devuelve título, duración y enlace.
+- Funciona en chats privados y grupos.
+- Solo envía metadatos y enlaces; no descarga ni reenvía videos ni miniaturas.
+- Requiere Node.js 20.18.1 o superior y `npm install`.
