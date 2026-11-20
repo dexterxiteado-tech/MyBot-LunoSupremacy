@@ -75,6 +75,9 @@ function extractText(message) {
 
   return (
     message.conversation ||
+    message.buttonsResponseMessage?.selectedButtonId ||
+    message.templateButtonReplyMessage?.selectedId ||
+    message.listResponseMessage?.singleSelectReply?.selectedRowId ||
     message.extendedTextMessage?.text ||
     message.imageMessage?.caption ||
     message.videoMessage?.caption ||
@@ -668,7 +671,8 @@ const ALLOWED_MEDIA_DOMAINS = [
   "twitter.com",
   "vimeo.com",
   "reddit.com",
-  "redd.it"
+  "redd.it",
+  "xvideos.com"
 ];
 
 function getUrlHost(value) {
@@ -1972,7 +1976,10 @@ async function handleXVideos(sock, jid, query) {
       const duration = video.duration ? String(video.duration).slice(0,30) : "No disponible";
       const views = video.views ? String(video.views).slice(0,40) : "No disponible";
       const caption = `╭─「 🔞 *XVIDEOS ${index+1}* 」\n│ 🎬 *${title}*\n│ ⏱️ Duración: ${duration}\n│ 👁️ Vistas: ${views}\n╰──────────────\n⚠️ Solo mayores de 18 años.`;
-      const buttons = url ? [{ index: 1, urlButton: { displayText: "ABRIR / DESCARGAR", url } }] : [];
+      const buttons = url ? [
+        { index: 1, quickReplyButton: { displayText: "⬇️ DESCARGAR", id: `.xvdownload ${url}` } },
+        { index: 2, urlButton: { displayText: "🔗 ABRIR VIDEO", url } }
+      ] : [];
       try {
         if (thumb) {
           await sock.sendMessage(jid, { image: { url: thumb }, caption, ...(buttons.length ? { templateButtons: buttons } : {}) });
@@ -2061,7 +2068,7 @@ const KNOWN_COMMANDS = new Set([
   "negrita", "cursiva", "tachado", "subrayada",
   "ahorcado", "v/f", "vf", "v", "f",
   "abrir", "cerrar", "invocar", "tag", "tagall", "hidetag", "admins", "infogrupo", "warn", "kick", "promote", "demote", "encuesta", "sorteo",
-  "play", "ytmp4", "fb", "ig", "tiktok", "xvideos",
+  "play", "ytmp4", "fb", "ig", "tiktok", "xvideos", "xvdownload",
   "hola", "menu", "help", "comandos", "ping", "info", "uptime", "runtime",
   "code", "delsesion", "dados", "moneda", "8ball", "ppt", "ship", "trivia", "respuesta", "mayus", "upper", "minus", "lower", "reverse", "contar", "base64", "random", "status", "ram", "disk", "version", "changelog"
 ]);
@@ -2159,6 +2166,14 @@ async function handleMessage(sock, msg, ctx = {}) {
     // Búsqueda XVideos (18+), disponible en privado y grupos.
     case cmd === "xvideos":
       return heavy(sock, jid, () => handleXVideos(sock, jid, args));
+    // El botón de cada resultado responde con .xvdownload + URL.
+    case cmd === "xvdownload": {
+      const url = args.split(/\s+/)[0];
+      if (!/^https?:\/\/\S+$/i.test(url) || !hostMatches(url, "xvideos.com")) {
+        return sock.sendMessage(jid, { text: "❌ Enlace de XVideos no válido." });
+      }
+      return heavy(sock, jid, () => downloadAndSend(sock, jid, url, "video", "xvideos"));
+    }
 
     // Descargas
     case cmd === "play": {
