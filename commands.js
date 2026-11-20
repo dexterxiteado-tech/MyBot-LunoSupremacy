@@ -1044,12 +1044,7 @@ async function downloadAndSend(sock, jid, url, mode, sourceCommand) {
       });
     }
 
-    await sock.sendMessage(jid, {
-      text:
-        "✅ Archivo enviado directamente a WhatsApp.\n" +
-        `📦 Tamaño: ${formatBytes(stats.size)}\n` +
-        "🧹 Archivo temporal eliminado al terminar."
-    });
+    log("[DESCARGA] Enviado:", sourceCommand, mode, formatBytes(stats.size));
 
   } catch (error) {
     const message = error.message || String(error);
@@ -1704,6 +1699,139 @@ async function handleTrool(sock, msg, jid, cmd) {
   });
 }
 
+
+// ======================================================
+// SUB-BOTS (.code, .qr, .delsesion)
+// Los crea el servidor (server.js) y llegan aquí en ctx.subbots.
+// ======================================================
+
+// Números del propietario del servidor (opcional): OWNER_NUMBER=5212345678901,5219876543210
+function normPhone(n) {
+  n = String(n || "").replace(/\D/g, "");
+  if (/^521\d{10}$/.test(n)) return "52" + n.slice(3);   // México con "1"
+  if (/^549\d{10}$/.test(n)) return "54" + n.slice(3);   // Argentina con "9"
+  return n;
+}
+const OWNER_NUMBERS = new Set(
+  (process.env.OWNER_NUMBER || "").split(/[,\s]+/).map(normPhone).filter(Boolean)
+);
+
+function jidNumber(j) {
+  return /@s\.whatsapp\.net$/.test(String(j || "")) ? norm(j).replace(/\D/g, "") : "";
+}
+
+// Número de quien escribió, si WhatsApp lo revela (con LID a veces no se puede).
+function senderNumber(msg, jid, sock) {
+  const k = msg.key || {};
+  if (k.fromMe) return jidNumber(sock.user?.id);
+  const candidates = jid.endsWith("@g.us")
+    ? [k.participant, k.participantAlt]
+    : [k.remoteJid, k.remoteJidAlt];
+  for (const c of candidates) {
+    const n = jidNumber(c);
+    if (n) return n;
+  }
+  return "";
+}
+
+function isServerOwner(msg, jid, sock) {
+  const n = normPhone(senderNumber(msg, jid, sock));
+  return !!n && OWNER_NUMBERS.has(n);
+}
+// Dueño de la cuenta (escribe desde su propio teléfono) o dueño del servidor.
+function isOwner(msg, jid, sock) {
+  return !!msg.key?.fromMe || isServerOwner(msg, jid, sock);
+}
+
+async function handleSubCode(sock, msg, jid, args, ctx) {
+  if (!ctx.subbots) {
+    await sock.sendMessage(jid, { text: "🚧 Los sub-bots no están disponibles aquí." });
+    return;
+  }
+  if (jid.endsWith("@g.us")) {
+    await sock.sendMessage(jid, {
+      text: "📩 Por seguridad, solicita el código por mensaje privado al bot."
+    });
+    return;
+  }
+
+  const me = senderNumber(msg, jid, sock);
+  let phone = args.replace(/\D/g, "");
+  if (!phone) phone = me;   // sin número: se usa el de quien escribe
+
+  if (!/^[1-9]\d{9,14}$/.test(phone || "")) {
+    await sock.sendMessage(jid, {
+      text:
+        "📱 Uso: .code 521234567890\n" +
+        "Escribe tu número con código de país, sin + ni espacios."
+    });
+    return;
+  }
+
+  // Evita que alguien pida códigos para números ajenos (llegan avisos a esos teléfonos).
+  if (!isOwner(msg, jid, sock) && me && normPhone(phone) !== normPhone(me)) {
+    await sock.sendMessage(jid, {
+      text: `⛔ Solo puedes vincular tu propio número (+${me}).`
+    });
+    return;
+  }
+
+  const r = await ctx.subbots.create({
+    mode: "code", phone, sock, jid, requester: me || jid
+  });
+  await sock.sendMessage(jid, {
+    text: r.error || "⏳ Generando tu código de vinculación...\nEspera unos segundos."
+  });
+}
+
+async function handleSubQr(sock, msg, jid, ctx) {
+  if (!ctx.subbots) {
+    await sock.sendMessage(jid, { text: "🚧 Los sub-bots no están disponibles aquí." });
+    return;
+  }
+  const r = await ctx.subbots.create({
+    mode: "qr", phone: "", sock, jid, requester: senderNumber(msg, jid, sock) || jid
+  });
+  await sock.sendMessage(jid, {
+    text: r.error || "⏳ Preparando el QR del sub-bot...\nEspera a que llegue la imagen."
+  });
+}
+
+async function handleDelSession(sock, msg, jid, args, ctx) {
+  if (!ctx.subbots) {
+    await sock.sendMessage(jid, { text: "🚧 Los sub-bots no están disponibles aquí." });
+    return;
+  }
+
+  const wanted = args.replace(/\D/g, "");
+  let target = null;
+
+  if (wanted) {
+    // Borrar el sub-bot de otro número: solo el propietario del servidor.
+    if (!isServerOwner(msg, jid, sock)) {
+      await sock.sendMessage(jid, { text: "⛔ Solo el propietario del servidor puede borrar sesiones de otros números." });
+      return;
+    }
+    target = ctx.subbots.findByPhone(wanted);
+  } else if (msg.key?.fromMe) {
+    target = ctx.subbots.findBySock(sock);          // dueño de esta cuenta
+  } else {
+    const me = senderNumber(msg, jid, sock);
+    target = me ? ctx.subbots.findByPhone(me) : null; // su propio sub-bot
+  }
+
+  if (!target) {
+    await sock.sendMessage(jid, { text: "ℹ️ No encontré ningún sub-bot para eliminar." });
+    return;
+  }
+
+  // Primero se avisa: después de cerrar sesión ya no se puede enviar nada.
+  await sock.sendMessage(jid, {
+    text: `🗑️ Sub-bot${target.number ? " +" + target.number : ""} eliminado.\n\nPara vincular otro escribe .code`
+  });
+  await ctx.subbots.remove(target.id);
+}
+
 // ======================================================
 // MENU (formato Luno Bot, con "reenviado de canal")
 // ======================================================
@@ -1722,6 +1850,7 @@ function getMenu() {
                 ".antisticker", ".antifotos", ".antivideos", ".antiaudios"]],
     ["TROOL", [".abrazar", ".bezar", ".nalguear", ".coquetear", ".jugar", ".golpear",
                ".bofetear", ".menso", ".burro", ".pendejo", ".idiota", ".pajero"]],
+    ["SUB-BOT", [".code", ".qr", ".delsesion"]],
     ["UTILIDADES", [".toaudio", ".qr", ".ping", ".uptime", ".runtime", ".info"]]
   ];
 
@@ -1776,7 +1905,8 @@ const KNOWN_COMMANDS = new Set([
   "ahorcado", "v/f", "vf", "v", "f",
   "abrir", "cerrar", "invocar", "tag", "sorteo",
   "play", "ytmp4", "fb", "ig", "tiktok",
-  "hola", "menu", "help", "comandos", "ping", "info", "uptime", "runtime"
+  "hola", "menu", "help", "comandos", "ping", "info", "uptime", "runtime",
+  "code", "delsesion"
 ]);
 function isKnownCommand(cmd) {
   return KNOWN_COMMANDS.has(cmd) ||
@@ -1807,8 +1937,12 @@ async function heavy(sock, jid, task) {
   }
 }
 
-async function handleMessage(sock, msg) {
+async function handleMessage(sock, msg, ctx = {}) {
   if (!msg?.message) return;
+
+  // Ignora mensajes viejos (por ejemplo los que llegan al reconectar).
+  const sentAt = Number(msg.messageTimestamp?.toString?.() ?? msg.messageTimestamp);
+  if (Number.isFinite(sentAt) && sentAt > 0 && Date.now() / 1000 - sentAt > 180) return;
 
   const jid = msg.key?.remoteJid;
   if (!jid || jid === "status@broadcast") return;
@@ -1855,7 +1989,15 @@ async function handleMessage(sock, msg) {
     case cmd === "toaudio":
       return heavy(sock, jid, () => handleToAudio(sock, jid, msg.message));
     case cmd === "qr":
+      // ".qr" solo, del propietario = QR para vincular un sub-bot; ".qr texto" = QR de ese texto.
+      if (!args && ctx.subbots && isOwner(msg, jid, sock)) return handleSubQr(sock, msg, jid, ctx);
       return handleQR(sock, jid, args.slice(0, 1000));
+
+    // Sub-bots
+    case cmd === "code":
+      return handleSubCode(sock, msg, jid, args, ctx);
+    case cmd === "delsesion":
+      return handleDelSession(sock, msg, jid, args, ctx);
 
     // Descargas
     case cmd === "play": {
@@ -1932,4 +2074,4 @@ async function handleMessage(sock, msg) {
   }
 }
 
-module.exports = { handleMessage, getMenu };
+module.exports = { handleMessage, getMenu, normPhone };
