@@ -717,6 +717,40 @@ function getSourceLabel(command, url) {
   return String(command || "WEB").toUpperCase();
 }
 
+
+// Tarjeta con la información del contenido, antes de empezar a descargar.
+async function sendInfoCard(sock, jid, info, mode, sourceCommand, url) {
+  const title = String(info.title || "Sin título").replace(/\s+/g, " ").slice(0, 100);
+  const channel = String(info.channel || info.uploader || "").slice(0, 60);
+  const link = info.webpage_url || (/^https?:\/\//i.test(url) ? url : "");
+  const lines = [
+    "🔥 *DEXTER MODZ*",
+    "",
+    `${mode === "audio" ? "🎵" : "🎬"} *Título:* ${title}`
+  ];
+  if (channel) lines.push(`👤 *Canal:* ${channel}`);
+  lines.push(
+    `⏱️ *Duración:* ${formatVideoDuration(info.duration)}`,
+    `🌐 *Sitio:* ${getSourceLabel(sourceCommand, url)}`
+  );
+  if (link) lines.push(`🔗 ${link}`);
+  lines.push("", `⏳ Descargando ${mode === "audio" ? "audio" : "video"}... espera un momento.`);
+  const caption = lines.join("\n");
+
+  const thumb = typeof info.thumbnail === "string" && /^https:\/\//i.test(info.thumbnail)
+    ? info.thumbnail
+    : null;
+  if (thumb) {
+    try {
+      await sock.sendMessage(jid, { image: { url: thumb }, caption });
+      return;
+    } catch (e) {
+      log("[INFO CARD] Sin miniatura:", e.message);
+    }
+  }
+  await sock.sendMessage(jid, { text: caption });
+}
+
 async function downloadAndSend(sock, jid, url, mode, sourceCommand) {
   await ytDlpReady;
   if (activeDownloads.has(jid)) {
@@ -784,22 +818,28 @@ async function downloadAndSend(sock, jid, url, mode, sourceCommand) {
   try {
     jobDir = fs.mkdtempSync(path.join(TEMP_DIR, "download-"));
 
-    await sock.sendMessage(jid, {
-      text:
-        "╔════════════════════╗\n" +
-        "       DEXTER MODZ\n" +
-        "╚════════════════════╝\n\n" +
-        "⏳ Procesando descarga...\n" +
-        `📁 Tipo: ${mode.toUpperCase()}\n` +
-        `🌐 Sitio: ${sourceCommand.toUpperCase()}\n\n` +
-        "Espera un momento."
-    });
+    let notified = false;
+    const sendGeneric = async () => {
+      if (notified) return;
+      notified = true;
+      await sock.sendMessage(jid, {
+        text:
+          "╔════════════════════╗\n" +
+          "       DEXTER MODZ\n" +
+          "╚════════════════════╝\n\n" +
+          "⏳ Procesando descarga...\n" +
+          `📁 Tipo: ${mode.toUpperCase()}\n` +
+          `🌐 Sitio: ${sourceCommand.toUpperCase()}\n\n` +
+          "Espera un momento."
+      });
+    };
 
     let videoInfo = null;
     let downloadedPath = null;
 
     // 1) API de terceros (si está configurada)
     if (DL_API_URL || DL_YT_API_URL) {
+      await sendGeneric();
       try {
         let target = url;
         if (sourceCommand === "play" && !playIsUrl) {
@@ -817,15 +857,6 @@ async function downloadAndSend(sock, jid, url, mode, sourceCommand) {
 
     // 2) yt-dlp (si no hubo API o falló)
     if (!downloadedPath) {
-    if (mode === "video") {
-      try {
-        const info = await runProcess(getYtDlpCommand(), [
-          "--no-warnings", "--no-playlist", "--skip-download", "--dump-single-json", url
-        ], 90000);
-        videoInfo = JSON.parse(info.stdout.trim());
-      } catch (e) { log("[YTDLP INFO]", e.message); }
-    }
-
     const outputTemplate = path.join(
       jobDir,
       "%(title).70s_%(id)s.%(ext)s"
@@ -901,6 +932,39 @@ async function downloadAndSend(sock, jid, url, mode, sourceCommand) {
       ? `ytsearch1:${url}`
       : url);
     args.push(input);
+
+    // Información del contenido (título, canal, duración, miniatura) antes de descargar.
+    try {
+      const infoArgs = ["--no-warnings", "--no-playlist", "--skip-download", "--dump-single-json"];
+      if (cookieFile) infoArgs.push("--cookies", cookieFile);
+      if (YTDLP_BIN === YTDLP_LOCAL) infoArgs.push("--js-runtimes", "node");
+      infoArgs.push(input);
+      const infoRes = await runProcess(getYtDlpCommand(), infoArgs, 60000);
+      let info = JSON.parse(infoRes.stdout.trim());
+      if (Array.isArray(info.entries)) info = info.entries[0] || {};
+      if (info && (info.title || info.duration)) {
+        videoInfo = info;
+        if (info.is_live) throw new Error("Es una transmisión en vivo.");
+        if (Number(info.duration) > 1800) {
+          await sock.sendMessage(jid, {
+            text: `⏱️ Ese contenido dura ${formatVideoDuration(info.duration)} y el máximo es 30:00.`
+          });
+          return;
+        }
+        if (!notified) {
+          notified = true;
+          await sendInfoCard(sock, jid, info, mode, sourceCommand, url);
+        }
+      }
+    } catch (e) {
+      const em = String(e.message || e).toLowerCase();
+      log("[YTDLP INFO]", e.message);
+      // Errores que se repetirían al descargar: se avisa de una vez.
+      if (/sign in|not a bot|http error (403|429)|private video|unavailable|has been removed|login required|no está instalado|transmisión en vivo/.test(em)) {
+        throw e;
+      }
+    }
+    await sendGeneric();
 
     log("[YTDLP] Descargando:", sourceCommand, mode, playIsUrl ? "URL" : "BÚSQUEDA");
 
