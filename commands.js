@@ -308,7 +308,7 @@ async function handleSticker(sock, jid, message) {
     }
 
     await sock.sendMessage(jid, {
-      text: "⏳ Creando sticker DEXTER MODZ..."
+      text: `⏳ Creando sticker ${BOT_NAME}...`
     });
 
     workDir = fs.mkdtempSync(path.join(TEMP_DIR, "sticker-"));
@@ -370,8 +370,8 @@ async function handleSticker(sock, jid, message) {
 
     await sock.sendMessage(jid, {
       sticker: { url: outputPath },
-      packname: "DEXTER MODZ",
-      author: "DEXTER MODZ"
+      packname: BOT_NAME,
+      author: BOT_NAME
     });
 
     log("[STICKER] Enviado:", formatBytes(stats.size));
@@ -431,7 +431,7 @@ async function handleToImage(sock, jid, message) {
 
     await sock.sendMessage(jid, {
       image: { url: outputPath },
-      caption: "🔥 DEXTER MODZ"
+      caption: `🔥 ${BOT_NAME}`
     });
 
   } catch (error) {
@@ -544,7 +544,7 @@ async function handleQR(sock, jid, text) {
 
     await sock.sendMessage(jid, {
       image: { url: outputPath },
-      caption: "🔥 DEXTER MODZ - QR"
+      caption: `🔥 ${BOT_NAME} - QR`
     });
 
   } catch (error) {
@@ -586,7 +586,10 @@ async function showRuntime(sock, jid) {
 // CONFIGURACION (variables de entorno opcionales)
 // ======================================================
 
-const BOT_NAME = process.env.BOT_NAME || "DEXTER MODZ";
+const BOT_NAME = process.env.BOT_NAME || "Luno Supremacy";
+// Reacción a cada comando. Cambia el emoji con REACT_EMOJI, o desactívala con "off".
+const REACT_RAW = (process.env.REACT_EMOJI || "🌙").trim();
+const REACT_EMOJI = /^(off|none|no|0)$/i.test(REACT_RAW) ? "" : REACT_RAW;
 const BOT_VERSION = process.env.BOT_VERSION || "v.1.0.0";
 const BOT_FOOTER = process.env.BOT_FOOTER || "by Dxx Modz";
 const YOUTUBE_LINK = process.env.YOUTUBE_LINK || "";
@@ -724,7 +727,7 @@ async function sendInfoCard(sock, jid, info, mode, sourceCommand, url) {
   const channel = String(info.channel || info.uploader || "").slice(0, 60);
   const link = info.webpage_url || (/^https?:\/\//i.test(url) ? url : "");
   const lines = [
-    "🔥 *DEXTER MODZ*",
+    `🔥 *${BOT_NAME}*`,
     "",
     `${mode === "audio" ? "🎵" : "🎬"} *Título:* ${title}`
   ];
@@ -825,7 +828,7 @@ async function downloadAndSend(sock, jid, url, mode, sourceCommand) {
       await sock.sendMessage(jid, {
         text:
           "╔════════════════════╗\n" +
-          "       DEXTER MODZ\n" +
+          "       " + BOT_NAME + "\n" +
           "╚════════════════════╝\n\n" +
           "⏳ Procesando descarga...\n" +
           `📁 Tipo: ${mode.toUpperCase()}\n` +
@@ -1030,14 +1033,14 @@ async function downloadAndSend(sock, jid, url, mode, sourceCommand) {
       await sock.sendMessage(jid, {
         video: { url: savedPath },
         mimetype: "video/mp4",
-        caption: `🔥 DEXTER MODZ\n\n🎬 Nombre: ${videoInfo?.title || path.basename(savedPath, extension)}\n⏱️ Duración: ${formatVideoDuration(videoInfo?.duration)}\n📥 Proveniente: ${getSourceLabel(sourceCommand, url)}\n\n👤 by Dxx Modz Sk`
+        caption: `🔥 ${BOT_NAME}\n\n🎬 Nombre: ${videoInfo?.title || path.basename(savedPath, extension)}\n⏱️ Duración: ${formatVideoDuration(videoInfo?.duration)}\n📥 Proveniente: ${getSourceLabel(sourceCommand, url)}\n\n👤 by Dxx Modz Sk`
       });
     } else {
       await sock.sendMessage(jid, {
         document: { url: savedPath },
         mimetype: mimeTypes[extension] || "application/octet-stream",
         fileName: path.basename(savedPath),
-        caption: mode === "video" ? `🔥 DEXTER MODZ\n\n🎬 Nombre: ${videoInfo?.title || path.basename(savedPath, extension)}\n⏱️ Duración: ${formatVideoDuration(videoInfo?.duration)}\n📥 Proveniente: ${getSourceLabel(sourceCommand, url)}\n\n👤 by Dxx Modz Sk` : "🔥 DEXTER MODZ"
+        caption: mode === "video" ? `🔥 ${BOT_NAME}\n\n🎬 Nombre: ${videoInfo?.title || path.basename(savedPath, extension)}\n⏱️ Duración: ${formatVideoDuration(videoInfo?.duration)}\n📥 Proveniente: ${getSourceLabel(sourceCommand, url)}\n\n👤 by Dxx Modz Sk` : `🔥 ${BOT_NAME}`
       });
     }
 
@@ -1767,6 +1770,21 @@ const seenBySocket = new WeakMap();
 const lastCommandAt = new Map();
 const pendingJobs = new Set();
 const COOLDOWN_MS = 1500;
+const KNOWN_COMMANDS = new Set([
+  "s", "sticker", "toimg", "toaudio", "qr",
+  "negrita", "cursiva", "tachado", "subrayada",
+  "ahorcado", "v/f", "vf", "v", "f",
+  "abrir", "cerrar", "invocar", "tag", "sorteo",
+  "play", "ytmp4", "fb", "ig", "tiktok",
+  "hola", "menu", "help", "comandos", "ping", "info", "uptime", "runtime"
+]);
+function isKnownCommand(cmd) {
+  return KNOWN_COMMANDS.has(cmd) ||
+    Object.prototype.hasOwnProperty.call(ANTI_LABELS, cmd) ||
+    Object.prototype.hasOwnProperty.call(ACTIONS, cmd) ||
+    Object.prototype.hasOwnProperty.call(METERS, cmd) ||
+    NOT_AVAILABLE.has(cmd);
+}
 const NOT_AVAILABLE = new Set([
   "tiktoksearch", "google", "ia", "deepseek", "chatgpt"
 ]);
@@ -1822,6 +1840,11 @@ async function handleMessage(sock, msg) {
   if (now - (lastCommandAt.get(jid) || 0) < COOLDOWN_MS) return;
   lastCommandAt.set(jid, now);
   if (lastCommandAt.size > 2000) lastCommandAt.delete(lastCommandAt.keys().next().value);
+
+  // Reacciona al mensaje del comando (solo si el comando existe).
+  if (REACT_EMOJI && isKnownCommand(cmd)) {
+    sock.sendMessage(jid, { react: { text: REACT_EMOJI, key: msg.key } }).catch(() => {});
+  }
 
   switch (true) {
     // Stickers y multimedia
