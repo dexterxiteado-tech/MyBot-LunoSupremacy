@@ -1832,6 +1832,119 @@ async function handleDelSession(sock, msg, jid, args, ctx) {
   await ctx.subbots.remove(target.id);
 }
 
+
+// ======================================================
+// COMANDOS LOCALES (sin API externa)
+// ======================================================
+const warningCounts = new Map();
+const eightBall = ["Sí, definitivamente.", "Todo apunta a que sí.", "Puedes contar con ello.", "No cuentes con eso.", "Mejor pregunta más tarde.", "Las señales no son claras.", "Es muy probable.", "Mi respuesta es no."];
+
+function mentionedJids(msg) {
+  const ci = findContextInfo(msg.message) || {};
+  const mentioned = ci.mentionedJid || [];
+  if (mentioned.length) return mentioned;
+  const quoted = ci.participant;
+  return quoted ? [quoted] : [];
+}
+
+async function handleGroupUtility(sock, msg, jid, cmd, args) {
+  const meta = await groupGuard(sock, msg, jid, false);
+  if (!meta) return;
+  const members = memberJids(meta, sock);
+  if (cmd === "tagall" || cmd === "hidetag") {
+    const text = args || (cmd === "hidetag" ? "📢 Aviso del grupo" : "📢 Atención grupo");
+    const body = cmd === "hidetag" ? text : `${text}\n\n${members.map(x => `@${norm(x)}`).join(" ")}`;
+    return sock.sendMessage(jid, { text: body, mentions: members });
+  }
+  if (cmd === "admins") {
+    const admins = (meta.participants || []).filter(x => x.admin).map(x => x.id);
+    return sock.sendMessage(jid, { text: `👑 *ADMINISTRADORES*\n\n${admins.map(x => `• @${norm(x)}`).join("\n") || "Sin administradores detectados"}`, mentions: admins });
+  }
+  if (cmd === "infogrupo") {
+    const admins = (meta.participants || []).filter(x => x.admin).length;
+    return sock.sendMessage(jid, { text: `👥 *${meta.subject || "Grupo"}*\n🆔 ${jid}\n👤 Participantes: ${meta.participants?.length || 0}\n👑 Administradores: ${admins}\n📅 Creado: ${meta.creation ? new Date(meta.creation * 1000).toLocaleDateString("es-MX") : "No disponible"}\n📝 Descripción: ${meta.desc || "Sin descripción"}` });
+  }
+  if (["kick", "promote", "demote"].includes(cmd)) {
+    const targets = mentionedJids(msg);
+    if (!targets.length) return sock.sendMessage(jid, { text: `Uso: .${cmd} @usuario (menciona o responde a su mensaje)` });
+    const guarded = await groupGuard(sock, msg, jid, true);
+    if (!guarded) return;
+    try {
+      await sock.groupParticipantsUpdate(jid, targets, cmd === "kick" ? "remove" : cmd === "promote" ? "promote" : "demote");
+      return sock.sendMessage(jid, { text: `${cmd === "kick" ? "👢 Acción completada" : cmd === "promote" ? "⬆️ Administrador(es) promovido(s)" : "⬇️ Administrador(es) degradado(s)"}: ${targets.map(x => `@${norm(x)}`).join(" ")}`, mentions: targets });
+    } catch (e) { return sock.sendMessage(jid, { text: `❌ No se pudo completar: ${e.message}` }); }
+  }
+  if (cmd === "warn") {
+    const targets = mentionedJids(msg);
+    if (!targets.length) return sock.sendMessage(jid, { text: "Uso: .warn @usuario (menciona o responde a su mensaje)" });
+    const target = targets[0], key = `${jid}:${target}`;
+    const count = (warningCounts.get(key) || 0) + 1;
+    warningCounts.set(key, count);
+    return sock.sendMessage(jid, { text: `⚠️ @${norm(target)} recibió una advertencia.\nAdvertencias en esta ejecución: ${count}/3`, mentions: [target] });
+  }
+  if (cmd === "encuesta") {
+    const parts = args.split("|").map(x => x.trim()).filter(Boolean);
+    if (parts.length < 3) return sock.sendMessage(jid, { text: "Uso: .encuesta Pregunta | Opción 1 | Opción 2" });
+    return sock.sendMessage(jid, { poll: { name: parts[0].slice(0, 250), values: parts.slice(1, 13).map(x => x.slice(0, 100)), selectableCount: 1 } });
+  }
+}
+
+function handleLocalFun(sock, jid, cmd, args) {
+  if (cmd === "dados") return sock.sendMessage(jid, { text: `🎲 Salió: ${1 + Math.floor(Math.random() * 6)}` });
+  if (cmd === "moneda") return sock.sendMessage(jid, { text: Math.random() < .5 ? "🪙 Cara" : "🪙 Cruz" });
+  if (cmd === "8ball") return sock.sendMessage(jid, { text: `🎱 ${pick(eightBall)}` });
+  if (cmd === "ppt") {
+    const options = ["piedra", "papel", "tijera"];
+    const user = args.toLowerCase();
+    if (!options.includes(user)) return sock.sendMessage(jid, { text: "Uso: .ppt piedra | papel | tijera" });
+    const bot = pick(options);
+    const win = user === bot ? "Empate" : ((user === "piedra" && bot === "tijera") || (user === "papel" && bot === "piedra") || (user === "tijera" && bot === "papel") ? "¡Ganaste!" : "Gané yo 😎");
+    return sock.sendMessage(jid, { text: `✊ Tú: ${user}\n🤖 Bot: ${bot}\n\n${win}` });
+  }
+  if (cmd === "ship") {
+    const n = Math.floor(Math.random() * 101);
+    return sock.sendMessage(jid, { text: `💘 Compatibilidad: ${n}%\n${n > 80 ? "¡Pareja legendaria!" : n > 50 ? "Hay posibilidades 👀" : "Mejor como amigos 😂"}` });
+  }
+  if (cmd === "trivia") {
+    const q = pick([{q:"¿Cuál es el planeta más grande?",a:"jupiter"},{q:"¿Cuántos lados tiene un hexágono?",a:"6"},{q:"¿Cuál es el océano más grande?",a:"pacifico"},{q:"¿Cuánto es 9 × 8?",a:"72"}]);
+    triviaAnswers.set(jid, q.a);
+    return sock.sendMessage(jid, { text: `🧠 *TRIVIA*\n${q.q}\nResponde: .respuesta tu respuesta` });
+  }
+  if (cmd === "respuesta") {
+    const answer = triviaAnswers.get(jid);
+    if (!answer) return sock.sendMessage(jid, { text: "Primero inicia una con .trivia" });
+    triviaAnswers.delete(jid);
+    return sock.sendMessage(jid, { text: args.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "") === answer ? "✅ ¡Correcto!" : `❌ La respuesta era: ${answer}` });
+  }
+  if (cmd === "mayus" || cmd === "upper") return sock.sendMessage(jid, { text: args ? args.toUpperCase() : "Uso: .mayus texto" });
+  if (cmd === "minus" || cmd === "lower") return sock.sendMessage(jid, { text: args ? args.toLowerCase() : "Uso: .minus texto" });
+  if (cmd === "reverse") return sock.sendMessage(jid, { text: args ? [...args].reverse().join("") : "Uso: .reverse texto" });
+  if (cmd === "contar") return sock.sendMessage(jid, { text: args ? `📝 Caracteres: ${[...args].length}\n🔤 Palabras: ${args.trim().split(/\s+/).length}` : "Uso: .contar texto" });
+  if (cmd === "base64") {
+    if (!args) return sock.sendMessage(jid, { text: "Uso: .base64 texto  |  .base64 -d texto_codificado" });
+    try { const decode = args.startsWith("-d "); const value = args.replace(/^-d\s+/, ""); return sock.sendMessage(jid, { text: decode ? Buffer.from(value, "base64").toString("utf8") : Buffer.from(value, "utf8").toString("base64") }); }
+    catch (_) { return sock.sendMessage(jid, { text: "❌ No se pudo convertir el texto." }); }
+  }
+  if (cmd === "random") {
+    const [a,b] = args.split(/[ ,]+/).map(Number);
+    if (!Number.isInteger(a) || !Number.isInteger(b) || a > b || b-a > 100000000) return sock.sendMessage(jid, { text: "Uso: .random 1 100" });
+    return sock.sendMessage(jid, { text: `🎲 Número aleatorio: ${Math.floor(Math.random() * (b-a+1)) + a}` });
+  }
+}
+
+const triviaAnswers = new Map();
+async function handleSystemInfo(sock, jid, cmd) {
+  const mem = process.memoryUsage();
+  if (cmd === "status") return sock.sendMessage(jid, { text: `🟢 *${BOT_NAME} ACTIVO*\n⏱️ Uptime: ${formatDuration((Date.now()-startedAt)/1000)}\n🧠 RAM proceso: ${formatBytes(mem.rss)}\n⚙️ Node: ${process.version}\n📱 Plataforma: ${process.platform}` });
+  if (cmd === "ram") return sock.sendMessage(jid, { text: `🧠 *MEMORIA RAM*\nProceso: ${formatBytes(mem.rss)}\nHeap usado: ${formatBytes(mem.heapUsed)}\nHeap total: ${formatBytes(mem.heapTotal)}\nSistema libre: ${formatBytes(os.freemem())}\nSistema total: ${formatBytes(os.totalmem())}` });
+  if (cmd === "disk") {
+    try { const st = fs.statfsSync(DATA_DIR); return sock.sendMessage(jid, { text: `💾 *ALMACENAMIENTO*\nTotal: ${formatBytes(st.blocks * st.bsize)}\nLibre: ${formatBytes(st.bavail * st.bsize)}` }); }
+    catch (_) { return sock.sendMessage(jid, { text: "No se pudo consultar el almacenamiento en este sistema." }); }
+  }
+  if (cmd === "version") return sock.sendMessage(jid, { text: `🔥 ${BOT_NAME}\nVersión: ${BOT_VERSION}\nNode.js: ${process.version}\nBaileys: @whiskeysockets/baileys` });
+  if (cmd === "changelog") return sock.sendMessage(jid, { text: `📋 *CHANGELOG ${BOT_VERSION}*\n• Comandos locales ampliados\n• Herramientas de grupo\n• Juegos sin API\n• Utilidades de texto y sistema\n• Menú reorganizado` });
+}
+
 // ======================================================
 // MENU (formato Luno Bot, con "reenviado de canal")
 // ======================================================
@@ -1843,15 +1956,15 @@ function getMenu() {
   const cmds = list => list.map(c => `> *${c}*`).join("\n");
   const sections = [
     ["DESCARGAS", [".play", ".ytmp4", ".fb", ".ig", ".tiktok"]],
-    ["STICKERS", [".s", ".toimg", ".tag"]],
+    ["STICKERS", [".s", ".toimg"]],
     ["TEXTOS", [".negrita", ".cursiva", ".tachado", ".subrayada"]],
-    ["JUEGOS", [".ahorcado", ".v/f"]],
-    ["GRUPOS", [".abrir", ".cerrar", ".invocar", ".sorteo", ".antilink", ".antispam",
+    ["JUEGOS", [".ahorcado", ".v/f", ".trivia", ".respuesta", ".ppt", ".dados", ".moneda", ".8ball", ".ship"]],
+    ["GRUPOS", [".abrir", ".cerrar", ".tag", ".tagall", ".hidetag", ".admins", ".infogrupo", ".warn", ".kick", ".promote", ".demote", ".encuesta", ".invocar", ".sorteo", ".antilink", ".antispam",
                 ".antisticker", ".antifotos", ".antivideos", ".antiaudios"]],
     ["TROOL", [".abrazar", ".bezar", ".nalguear", ".coquetear", ".jugar", ".golpear",
                ".bofetear", ".menso", ".burro", ".pendejo", ".idiota", ".pajero"]],
     ["SUB-BOT", [".code", ".qr", ".delsesion"]],
-    ["UTILIDADES", [".toaudio", ".qr", ".ping", ".uptime", ".runtime", ".info"]]
+    ["UTILIDADES", [".toaudio", ".qr", ".ping", ".uptime", ".runtime", ".info", ".status", ".ram", ".disk", ".version", ".changelog", ".mayus", ".minus", ".reverse", ".contar", ".base64", ".random"]]
   ];
 
   const out = [`*_${BOT_NAME} ${BOT_VERSION}_* ☪️`, " "];
@@ -1903,10 +2016,10 @@ const KNOWN_COMMANDS = new Set([
   "s", "sticker", "toimg", "toaudio", "qr",
   "negrita", "cursiva", "tachado", "subrayada",
   "ahorcado", "v/f", "vf", "v", "f",
-  "abrir", "cerrar", "invocar", "tag", "sorteo",
+  "abrir", "cerrar", "invocar", "tag", "tagall", "hidetag", "admins", "infogrupo", "warn", "kick", "promote", "demote", "encuesta", "sorteo",
   "play", "ytmp4", "fb", "ig", "tiktok",
   "hola", "menu", "help", "comandos", "ping", "info", "uptime", "runtime",
-  "code", "delsesion"
+  "code", "delsesion", "dados", "moneda", "8ball", "ppt", "ship", "trivia", "respuesta", "mayus", "upper", "minus", "lower", "reverse", "contar", "base64", "random", "status", "ram", "disk", "version", "changelog"
 ]);
 function isKnownCommand(cmd) {
   return KNOWN_COMMANDS.has(cmd) ||
@@ -2041,10 +2154,18 @@ async function handleMessage(sock, msg, ctx = {}) {
       return handleInvoke(sock, msg, jid, args);
     case cmd === "tag":
       return handleTag(sock, msg, jid, args);
+    case ["tagall", "hidetag", "admins", "infogrupo", "warn", "kick", "promote", "demote", "encuesta"].includes(cmd):
+      return handleGroupUtility(sock, msg, jid, cmd, args);
     case cmd === "sorteo":
       return handleRaffle(sock, msg, jid, args);
     case Object.prototype.hasOwnProperty.call(ANTI_LABELS, cmd):
       return handleAntiToggle(sock, msg, jid, cmd, args);
+
+    // Juegos y utilidades locales sin API
+    case ["dados", "moneda", "8ball", "ppt", "ship", "trivia", "respuesta", "mayus", "upper", "minus", "lower", "reverse", "contar", "base64", "random"].includes(cmd):
+      return handleLocalFun(sock, jid, cmd, args);
+    case ["status", "ram", "disk", "version", "changelog"].includes(cmd):
+      return handleSystemInfo(sock, jid, cmd);
 
     // Trool
     case Object.prototype.hasOwnProperty.call(ACTIONS, cmd) ||
