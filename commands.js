@@ -1976,18 +1976,36 @@ async function handleXVideos(sock, jid, query) {
       const duration = video.duration ? String(video.duration).slice(0,30) : "No disponible";
       const views = video.views ? String(video.views).slice(0,40) : "No disponible";
       const caption = `╭─「 🔞 *XVIDEOS ${index+1}* 」\n│ 🎬 *${title}*\n│ ⏱️ Duración: ${duration}\n│ 👁️ Vistas: ${views}\n╰──────────────\n⚠️ Solo mayores de 18 años.`;
-      const buttons = url ? [
-        { index: 1, quickReplyButton: { displayText: "⬇️ DESCARGAR", id: `.xvdownload ${url}` } },
-        { index: 2, urlButton: { displayText: "🔗 ABRIR VIDEO", url } }
-      ] : [];
-      try {
-        if (thumb) {
-          await sock.sendMessage(jid, { image: { url: thumb }, caption, ...(buttons.length ? { templateButtons: buttons } : {}) });
-        } else {
-          await sock.sendMessage(jid, { text: `${caption}\n🔗 ${url || "Enlace no disponible"}`, ...(buttons.length ? { templateButtons: buttons } : {}) });
+      // Enviar primero la ficha (imagen + datos) y después los botones
+      // en un mensaje independiente: algunos clientes/Baileys no muestran
+      // botones interactivos cuando se adjuntan directamente a una imagen.
+      if (thumb) {
+        await sock.sendMessage(jid, { image: { url: thumb }, caption });
+      } else {
+        await sock.sendMessage(jid, { text: caption });
+      }
+      if (url) {
+        const buttons = [
+          { index: 1, quickReplyButton: { displayText: "⬇️ DESCARGAR", id: `.xvdownload ${url}` } },
+          { index: 2, urlButton: { displayText: "🔗 ABRIR VIDEO", url } }
+        ];
+        try {
+          await sock.sendMessage(jid, {
+            text: `📥 *OPCIONES — XVideos ${index + 1}*`,
+            footer: "Cada botón corresponde a este resultado.",
+            templateButtons: buttons
+          });
+        } catch (buttonError) {
+          log("[XVIDEOS BUTTONS]", buttonError.message);
+          await sock.sendMessage(jid, {
+            text: `⬇️ Para descargar este resultado, responde con:
+.xvdownload ${url}
+
+🔗 Abrir: ${url}`
+          });
         }
-      } catch (_) {
-        await sock.sendMessage(jid, { text: `${caption}\n🔗 ${url || "Enlace no disponible"}` });
+      } else {
+        await sock.sendMessage(jid, { text: "⚠️ Este resultado no proporcionó un enlace válido para descargar." });
       }
     }
   } catch (error) {
