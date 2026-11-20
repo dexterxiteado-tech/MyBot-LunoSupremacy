@@ -5,6 +5,8 @@
 
 const { spawn, spawnSync } = require("child_process");
 const { downloadContentFromMessage } = require("@whiskeysockets/baileys");
+let sendInteractiveButtons = null;
+try { sendInteractiveButtons = require("baileys_helper").sendButtons; } catch (_) {}
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
@@ -1988,17 +1990,14 @@ async function handleXVideos(sock, jid, query) {
         // Botón de respuesta compatible con el formato clásico de Baileys.
         // El ID contiene la URL de ESTE resultado, para no mezclar descargas.
         try {
-          await sock.sendMessage(jid, {
-            text: `📥 *OPCIONES — XVideos ${index + 1}*\nPulsa el botón para descargar este resultado.`,
+          const buttonText = `📥 *OPCIONES — XVideos ${index + 1}*\nPulsa el botón para descargar este resultado.`;
+          if (!sendInteractiveButtons) throw new Error("baileys_helper no está instalado");
+          await sendInteractiveButtons(sock, jid, {
+            text: buttonText,
             footer: "DEXTER MODZ • Descarga individual",
             buttons: [
-              {
-                buttonId: `.xvdownload ${url}`,
-                buttonText: { displayText: "⬇️ DESCARGAR" },
-                type: 1
-              }
-            ],
-            headerType: 1
+              { id: `.xvdownload ${url}`, text: "⬇️ DESCARGAR" }
+            ]
           });
         } catch (buttonError) {
           log("[XVIDEOS BUTTONS]", buttonError.message);
