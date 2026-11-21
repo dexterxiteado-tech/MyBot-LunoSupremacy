@@ -387,8 +387,8 @@ async function handleSticker(sock, jid, message) {
 
     await sock.sendMessage(jid, {
       sticker: { url: outputPath },
-      packname: BOT_NAME,
-      author: BOT_NAME
+      packname: "Luno Supremacy",
+      author: "Dxx Modz"
     });
 
     log("[STICKER] Enviado:", formatBytes(stats.size));
