@@ -2089,7 +2089,7 @@ const KNOWN_COMMANDS = new Set([
   "abrir", "cerrar", "invocar", "tag", "tagall", "hidetag", "admins", "infogrupo", "warn", "kick", "promote", "demote", "encuesta", "sorteo",
   "play", "ytmp4", "fb", "ig", "tiktok", "xvideos", "xvdownload",
   "hola", "menu", "help", "comandos", "ping", "info", "uptime", "runtime",
-  "code", "delsesion", "offcmd", "oncmd", "estadocmd", "dados", "moneda", "8ball", "ppt", "ship", "trivia", "respuesta", "mayus", "upper", "minus", "lower", "reverse", "contar", "base64", "random", "status", "ram", "disk", "version", "changelog"
+  "code", "delsesion", "dados", "moneda", "8ball", "ppt", "ship", "trivia", "respuesta", "mayus", "upper", "minus", "lower", "reverse", "contar", "base64", "random", "status", "ram", "disk", "version", "changelog"
 ]);
 function isKnownCommand(cmd) {
   return KNOWN_COMMANDS.has(cmd) ||
@@ -2118,54 +2118,6 @@ async function heavy(sock, jid, task) {
   } finally {
     pendingJobs.delete(jid);
   }
-}
-
-// ======================================================
-// CONTROL INDIVIDUAL DE COMANDOS (.offcmd / .oncmd)
-// Se guarda en DATA_DIR/disabled_commands.json y aplica
-// a todas las cuentas/sub-bots que usan este proyecto.
-// ======================================================
-const DISABLED_COMMANDS_FILE = path.join(DATA_DIR, "disabled_commands.json");
-let disabledCommands = new Set();
-try {
-  const saved = JSON.parse(fs.readFileSync(DISABLED_COMMANDS_FILE, "utf8"));
-  if (Array.isArray(saved)) disabledCommands = new Set(saved.map(x => String(x).toLowerCase()));
-} catch (_) {}
-
-function saveDisabledCommands() {
-  const tmp = DISABLED_COMMANDS_FILE + ".tmp";
-  fs.writeFileSync(tmp, JSON.stringify([...disabledCommands].sort(), null, 2));
-  fs.renameSync(tmp, DISABLED_COMMANDS_FILE);
-}
-
-async function handleCommandControl(sock, msg, jid, cmd, args) {
-  if (!isOwner(msg, jid, sock)) {
-    return sock.sendMessage(jid, { text: "⛔ Solo el propietario puede modificar los comandos." });
-  }
-  const target = String(args || "").trim().toLowerCase().replace(/^[!.\/]+/, "");
-  if (cmd === "estadocmd") {
-    const list = [...disabledCommands].sort();
-    return sock.sendMessage(jid, { text: list.length
-      ? `🚫 *COMANDOS DESACTIVADOS*\n\n${list.map(x => `• .${x}`).join("\n")}\n\nPara reactivar: .oncmd nombre`
-      : "✅ Todos los comandos están activados." });
-  }
-  if (!target || !/^[a-z0-9_/-]{1,40}$/.test(target)) {
-    return sock.sendMessage(jid, { text: `Uso:\n.${cmd} nombre\nEjemplo: .${cmd} play` });
-  }
-  if (["offcmd", "oncmd", "estadocmd"].includes(target)) {
-    return sock.sendMessage(jid, { text: "⚠️ Ese comando de administración no se puede desactivar." });
-  }
-  if (!isKnownCommand(target)) {
-    return sock.sendMessage(jid, { text: `❓ No reconozco el comando .${target}.` });
-  }
-  if (cmd === "offcmd") {
-    disabledCommands.add(target);
-    saveDisabledCommands();
-    return sock.sendMessage(jid, { text: `🚫 El comando .${target} quedó desactivado.` });
-  }
-  disabledCommands.delete(target);
-  saveDisabledCommands();
-  return sock.sendMessage(jid, { text: `✅ El comando .${target} quedó activado.` });
 }
 
 async function handleMessage(sock, msg, ctx = {}) {
@@ -2200,12 +2152,6 @@ async function handleMessage(sock, msg, ctx = {}) {
   const cmd = m ? m[1].toLowerCase() : (trimmed.toLowerCase() === "hola" ? "hola" : null);
   const args = m ? (m[2] || "").trim() : "";
   if (!cmd) return;
-
-  // Los controles de comandos se procesan antes del bloqueo individual.
-  if (["offcmd", "oncmd", "estadocmd"].includes(cmd)) {
-    return handleCommandControl(sock, msg, jid, cmd, args);
-  }
-  if (disabledCommands.has(cmd)) return;
 
   const now = Date.now();
   if (now - (lastCommandAt.get(jid) || 0) < COOLDOWN_MS) return;
