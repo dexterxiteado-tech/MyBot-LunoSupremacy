@@ -17,6 +17,14 @@ try { QRCode = require("qrcode"); } catch (_) {}
 let xvideosClient = null;
 try { xvideosClient = require("@rodrigogs/xvideos"); } catch (_) {}
 
+let pornhubClient = null;
+try {
+  const { PornHub } = require("pornhub.js");
+  if (typeof PornHub === "function") pornhubClient = new PornHub();
+} catch (e) {
+  // La búsqueda de Pornhub queda desactivada si la dependencia no se instala.
+}
+
 // ffmpeg: usa el del sistema si existe (Termux, VPS); si no, el de ffmpeg-static (Render).
 let FFMPEG = "ffmpeg";
 try {
@@ -674,7 +682,8 @@ const ALLOWED_MEDIA_DOMAINS = [
   "vimeo.com",
   "reddit.com",
   "redd.it",
-  "xvideos.com"
+  "xvideos.com",
+  "pornhub.com"
 ];
 
 function getUrlHost(value) {
@@ -2016,6 +2025,80 @@ async function handleXVideos(sock, jid, query) {
 }
 
 // ======================================================
+// BUSCADOR PORNHUB (18+): usa pornhub.js y reutiliza yt-dlp
+// para descargar únicamente URLs públicas no premium.
+// ======================================================
+async function handlePornHub(sock, jid, query) {
+  if (!query || query.length < 2) {
+    return sock.sendMessage(jid, {
+      text: "🔎 Uso: .pornhub término de búsqueda\nEjemplo: .pornhub búsqueda\n\n🔞 Solo para mayores de 18 años."
+    });
+  }
+  if (!pornhubClient) {
+    return sock.sendMessage(jid, {
+      text: "⚠️ No se pudo cargar pornhub.js. Revisa que esté en dependencies y vuelve a desplegar Render."
+    });
+  }
+
+  try {
+    const result = await pornhubClient.searchVideo(query.slice(0, 100), { page: 1 });
+    const videos = Array.isArray(result) ? result : (result?.data || result?.videos || []);
+    const publicVideos = videos.filter(v => v && v.premium !== true).slice(0, 5);
+
+    if (!publicVideos.length) {
+      return sock.sendMessage(jid, { text: `🔎 No encontré videos públicos para: ${query}` });
+    }
+
+    await sock.sendMessage(jid, {
+      text: `🔞 *PORNHUB — RESULTADOS*\n🔎 ${query.slice(0, 100)}\n📄 ${publicVideos.length} resultados\n⚠️ Contenido exclusivo para mayores de 18 años.`
+    });
+
+    for (const [index, video] of publicVideos.entries()) {
+      const title = String(video.title || "Sin título").replace(/[\r\n]+/g, " ").slice(0, 180);
+      const url = /^https?:\/\//i.test(video.url || "") ? video.url : "";
+      const thumb = typeof video.preview === "string" && /^https?:\/\//i.test(video.preview)
+        ? video.preview
+        : (typeof video.thumbnail === "string" && /^https?:\/\//i.test(video.thumbnail) ? video.thumbnail : "");
+      const duration = String(video.duration || "No disponible").slice(0, 30);
+      const views = String(video.views || "No disponible").slice(0, 40);
+      const caption = `╭─「 🔞 *PORNHUB ${index + 1}* 」\n│ 🎬 *${title}*\n│ ⏱️ Duración: ${duration}\n│ 👁️ Vistas: ${views}\n╰──────────────\n⚠️ Solo mayores de 18 años.`;
+
+      if (thumb) {
+        await sock.sendMessage(jid, { image: { url: thumb }, caption });
+      } else {
+        await sock.sendMessage(jid, { text: caption });
+      }
+
+      if (url && hostMatches(url, "pornhub.com")) {
+        try {
+          const buttonText = `📥 *OPCIONES — Pornhub ${index + 1}*\nPulsa el botón para descargar este resultado.`;
+          if (!sendInteractiveButtons) throw new Error("baileys_helper no está instalado");
+          await sendInteractiveButtons(sock, jid, {
+            text: buttonText,
+            footer: "DEXTER MODZ • Descarga individual",
+            buttons: [
+              { id: `.phdownload ${url}`, text: "⬇️ DESCARGAR" }
+            ]
+          });
+        } catch (buttonError) {
+          log("[PORNHUB BUTTONS]", buttonError.message);
+          await sock.sendMessage(jid, {
+            text: `⬇️ *DESCARGA MANUAL — Pornhub ${index + 1}*\nCopia y envía:\n.phdownload ${url}\n\n🔗 Abrir: ${url}`
+          });
+        }
+      } else {
+        await sock.sendMessage(jid, { text: "⚠️ Este resultado no proporcionó un enlace válido de Pornhub." });
+      }
+    }
+  } catch (error) {
+    log("[PORNHUB]", error.message);
+    return sock.sendMessage(jid, {
+      text: "❌ No pude consultar Pornhub. Puede estar bloqueando la conexión o haber cambiado su sitio. Intenta más tarde."
+    });
+  }
+}
+
+// ======================================================
 // MENU (formato Luno Bot, con "reenviado de canal")
 // ======================================================
 
@@ -2025,7 +2108,7 @@ function getMenu() {
   });
   const cmds = list => list.map(c => `> *${c}*`).join("\n");
   const sections = [
-    ["DESCARGAS", [".play", ".ytmp4", ".fb", ".ig", ".tiktok", ".xvideos"]],
+    ["DESCARGAS", [".play", ".ytmp4", ".fb", ".ig", ".tiktok", ".xvideos", ".pornhub"]],
     ["STICKERS", [".s", ".toimg"]],
     ["TEXTOS", [".negrita", ".cursiva", ".tachado", ".subrayada"]],
     ["JUEGOS", [".ahorcado", ".v/f", ".trivia", ".respuesta", ".ppt", ".dados", ".moneda", ".8ball", ".ship"]],
@@ -2087,7 +2170,7 @@ const KNOWN_COMMANDS = new Set([
   "negrita", "cursiva", "tachado", "subrayada",
   "ahorcado", "v/f", "vf", "v", "f",
   "abrir", "cerrar", "invocar", "tag", "tagall", "hidetag", "admins", "infogrupo", "warn", "kick", "promote", "demote", "encuesta", "sorteo",
-  "play", "ytmp4", "fb", "ig", "tiktok", "xvideos", "xvdownload",
+  "play", "ytmp4", "fb", "ig", "tiktok", "xvideos", "xvdownload", "pornhub", "phdownload",
   "hola", "menu", "help", "comandos", "ping", "info", "uptime", "runtime",
   "code", "delsesion", "dados", "moneda", "8ball", "ppt", "ship", "trivia", "respuesta", "mayus", "upper", "minus", "lower", "reverse", "contar", "base64", "random", "status", "ram", "disk", "version", "changelog"
 ]);
@@ -2185,6 +2268,18 @@ async function handleMessage(sock, msg, ctx = {}) {
     // Búsqueda XVideos (18+), disponible en privado y grupos.
     case cmd === "xvideos":
       return heavy(sock, jid, () => handleXVideos(sock, jid, args));
+    // Buscador Pornhub (18+), solo resultados públicos.
+    case cmd === "pornhub":
+      return heavy(sock, jid, () => handlePornHub(sock, jid, args));
+    // El botón de cada resultado responde con .phdownload + URL.
+    case cmd === "phdownload": {
+      const url = args.split(/\s+/)[0];
+      if (!/^https?:\/\/\S+$/i.test(url) || !hostMatches(url, "pornhub.com")) {
+        return sock.sendMessage(jid, { text: "❌ Enlace de Pornhub no válido." });
+      }
+      return heavy(sock, jid, () => downloadAndSend(sock, jid, url, "video", "pornhub"));
+    }
+
     // El botón de cada resultado responde con .xvdownload + URL.
     case cmd === "xvdownload": {
       const url = args.split(/\s+/)[0];
