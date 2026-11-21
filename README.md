@@ -37,3 +37,12 @@ Los comandos que necesitan servicios externos/API (por ejemplo IA, Google, Shaza
 - `.phdownload URL`: descarga el enlace de un resultado público mediante `yt-dlp` en el contenedor de Render.
 - Requiere que Render despliegue usando el `Dockerfile`, que instala `yt-dlp` y `ffmpeg`.
 - No incluye acceso a contenido Premium ni mecanismos para eludir controles de acceso. Solo usar con contenido legal y personas adultas.
+
+
+## Erome
+
+- `.erome término`: busca álbumes públicos de Erome y muestra tarjetas con miniatura y botón de descarga.
+- `.erome https://www.erome.com/a/ID`: consulta un álbum público directamente.
+- `.eromedownload URL`: descarga el álbum público completo (imágenes y videos) en un archivo temporal.
+- Render instala `gallery-dl` durante la construcción Docker. El archivo temporal se elimina después de enviarse.
+- No se accede a álbumes privados ni se eluden controles de acceso.

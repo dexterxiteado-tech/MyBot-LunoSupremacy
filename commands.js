@@ -136,16 +136,17 @@ function runProcess(command, args, timeoutMs = 120000) {
     const finish = (error, result) => {
       if (finished) return;
       finished = true;
-      clearTimeout(timer);
+      if (timer) clearTimeout(timer);
 
       if (error) reject(error);
       else resolve(result);
     };
 
-    const timer = setTimeout(() => {
+    // timeoutMs <= 0 desactiva el temporizador (descargas sin límite artificial).
+    const timer = Number(timeoutMs) > 0 ? setTimeout(() => {
       child.kill("SIGKILL");
       finish(new Error("Tiempo de espera agotado."));
-    }, timeoutMs);
+    }, timeoutMs) : null;
 
     child.stdout.on("data", data => {
       stdout = (stdout + data.toString()).slice(-1024 * 1024);
@@ -625,7 +626,7 @@ try { fs.mkdirSync(DATA_DIR, { recursive: true }); } catch (_) {}
 // DESCARGAS CON YT-DLP (se descarga solo, no requiere Docker)
 // ======================================================
 
-const DOWNLOAD_TIMEOUT = 12 * 60 * 1000;
+// Las descargas no tienen límite artificial de duración ni de tiempo.
 const activeDownloads = new Set();
 
 const YTDLP_LOCAL = path.join(os.tmpdir(), "dexter-bin", "yt-dlp");
@@ -683,7 +684,8 @@ const ALLOWED_MEDIA_DOMAINS = [
   "reddit.com",
   "redd.it",
   "xvideos.com",
-  "pornhub.com"
+  "pornhub.com",
+  "erome.com"
 ];
 
 function getUrlHost(value) {
@@ -918,11 +920,8 @@ async function downloadAndSend(sock, jid, url, mode, sourceCommand) {
       log("[YTDLP] Cookies activadas.");
     }
 
-    // Límites para proteger el servidor: máx. 30 min y ~80 MB, sin directos.
-    args.push(
-      "--max-filesize", "80M",
-      "--match-filter", "!is_live & duration<=?1800"
-    );
+    // Sin topes artificiales de duración, tamaño o tipo de transmisión.
+    // El archivo se guarda temporalmente y se elimina en el finally de esta tarea.
     if (path.isAbsolute(FFMPEG)) args.push("--ffmpeg-location", FFMPEG);
     // yt-dlp reciente necesita un motor de JavaScript para YouTube; se usa Node.
     if (YTDLP_BIN === YTDLP_LOCAL) args.push("--js-runtimes", "node");
@@ -965,13 +964,6 @@ async function downloadAndSend(sock, jid, url, mode, sourceCommand) {
       if (Array.isArray(info.entries)) info = info.entries[0] || {};
       if (info && (info.title || info.duration)) {
         videoInfo = info;
-        if (info.is_live) throw new Error("Es una transmisión en vivo.");
-        if (Number(info.duration) > 1800) {
-          await sock.sendMessage(jid, {
-            text: `⏱️ Ese contenido dura ${formatVideoDuration(info.duration)} y el máximo es 30:00.`
-          });
-          return;
-        }
         if (!notified) {
           notified = true;
           await sendInfoCard(sock, jid, info, mode, sourceCommand, url);
@@ -992,7 +984,7 @@ async function downloadAndSend(sock, jid, url, mode, sourceCommand) {
     const result = await runProcess(
       getYtDlpCommand(),
       args,
-      DOWNLOAD_TIMEOUT
+      0 // Sin límite artificial de tiempo para la descarga.
     );
 
     const lines = result.stdout
@@ -1004,7 +996,7 @@ async function downloadAndSend(sock, jid, url, mode, sourceCommand) {
     }
 
     if (!downloadedPath || !fs.existsSync(downloadedPath)) {
-      throw new Error("No se descargó nada: el video es muy largo (máx. 30 min), es un directo o pesa demasiado.");
+      throw new Error("No se generó el archivo de descarga. El sitio pudo bloquearla o no entregar un formato compatible.");
     }
 
     const originalStats = fs.statSync(downloadedPath);
@@ -1182,7 +1174,6 @@ const DL_YT_API_URL = process.env.DL_YT_API_URL || "";   // opcional: endpoint s
 const DL_API_KEY = process.env.DL_API_KEY || "";
 const DL_API_METHOD = (process.env.DL_API_METHOD || "GET").toUpperCase();
 const DL_API_BODY = process.env.DL_API_BODY || "";
-const API_MAX_BYTES = 80 * 1024 * 1024;
 const BROWSER_UA = "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 Chrome/124.0.0.0 Mobile Safari/537.36";
 
 function youtubeId(value) {
@@ -1272,29 +1263,23 @@ async function downloadToFile(fileUrl, dir, mode) {
   const res = await fetch(fileUrl, {
     redirect: "follow",
     headers: { "User-Agent": BROWSER_UA },
-    signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT)
   });
   if (!res.ok || !res.body) throw new Error("el archivo respondió HTTP " + res.status);
 
   const type = (res.headers.get("content-type") || "").toLowerCase();
   if (/(json|html|text\/)/.test(type)) throw new Error("la API no devolvió un archivo sino una página");
-  if (Number(res.headers.get("content-length") || 0) > API_MAX_BYTES) throw new Error("archivo demasiado grande");
 
   const ext = /mpeg|mp3/.test(type) ? ".mp3" : /mp4a|m4a|audio\/mp4/.test(type) ? ".m4a"
     : /video\/mp4/.test(type) ? ".mp4" : mode === "audio" ? ".mp3" : ".mp4";
   const filePath = path.join(dir, "api_download" + ext);
 
-  const { Readable, Transform } = require("stream");
+  const { Readable } = require("stream");
   const { pipeline } = require("stream/promises");
   let total = 0;
-  const limiter = new Transform({
-    transform(chunk, _enc, cb) {
-      total += chunk.length;
-      if (total > API_MAX_BYTES) cb(new Error("archivo demasiado grande"));
-      else cb(null, chunk);
-    }
+  const counter = new (require("stream").Transform)({
+    transform(chunk, _enc, cb) { total += chunk.length; cb(null, chunk); }
   });
-  await pipeline(Readable.fromWeb(res.body), limiter, fs.createWriteStream(filePath));
+  await pipeline(Readable.fromWeb(res.body), counter, fs.createWriteStream(filePath));
   if (total < 1024) throw new Error("archivo vacío");
   return filePath;
 }
@@ -1302,7 +1287,7 @@ async function downloadToFile(fileUrl, dir, mode) {
 async function downloadViaApi(targetUrl, mode, dir) {
   const template = isYoutubeUrl(targetUrl) && DL_YT_API_URL ? DL_YT_API_URL : DL_API_URL;
   const url = fillTemplate(template, targetUrl);
-  const options = { method: DL_API_METHOD, headers: apiHeaders(template), signal: AbortSignal.timeout(90000) };
+  const options = { method: DL_API_METHOD, headers: apiHeaders(template) };
   if (DL_API_METHOD === "POST") {
     options.headers["Content-Type"] = "application/json";
     options.body = fillTemplate(DL_API_BODY || '{"url":"{url}"}', targetUrl, true);
@@ -2099,6 +2084,187 @@ async function handlePornHub(sock, jid, query) {
 }
 
 // ======================================================
+// BUSCADOR EROME: álbumes públicos con miniatura y descarga.
+// gallery-dl descarga el contenido del álbum (fotos y videos)
+// en almacenamiento temporal; el archivo se elimina al enviarse.
+// ======================================================
+function decodeHtmlEntities(value) {
+  return String(value || "")
+    .replace(/&amp;/gi, "&").replace(/&quot;/gi, '"')
+    .replace(/&#39;|&apos;/gi, "'").replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">").replace(/&#(\d+);/g, (_, n) => String.fromCodePoint(Number(n)))
+    .replace(/&#x([0-9a-f]+);/gi, (_, n) => String.fromCodePoint(parseInt(n, 16)));
+}
+
+function cleanHtmlText(value) {
+  return decodeHtmlEntities(String(value || "").replace(/<script[\s\S]*?<\/script>/gi, " ").replace(/<style[\s\S]*?<\/style>/gi, " ").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim());
+}
+
+function absoluteEromeUrl(value) {
+  try {
+    const u = new URL(decodeHtmlEntities(value), "https://www.erome.com/");
+    return u.protocol === "https:" && (u.hostname === "erome.com" || u.hostname.endsWith(".erome.com")) ? u.href : "";
+  } catch (_) { return ""; }
+}
+
+async function fetchEromePage(url) {
+  const response = await fetch(url, {
+    headers: {
+      "user-agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36",
+      "accept": "text/html,application/xhtml+xml",
+      "referer": "https://www.erome.com/"
+    },
+    signal: AbortSignal.timeout(30000)
+  });
+  if (!response.ok) throw new Error(`Erome respondió HTTP ${response.status}`);
+  return response.text();
+}
+
+function parseEromeSearch(html) {
+  const links = [];
+  let m;
+  const anchorRe = /<a\b[^>]*>/gi;
+  while ((m = anchorRe.exec(html)) !== null) {
+    const tag = m[0];
+    const cls = tag.match(/\bclass\s*=\s*["']([^"']+)["']/i)?.[1] || "";
+    if (!/(^|\s)album-link(\s|$)/i.test(cls)) continue;
+    const href = tag.match(/\bhref\s*=\s*["']([^"']+)["']/i)?.[1];
+    const url = href ? absoluteEromeUrl(href) : "";
+    if (url && /\/a\/[A-Za-z0-9_-]+/.test(new URL(url).pathname) && !links.includes(url)) links.push(url);
+  }
+  const titles = [];
+  const titleRe = /<a\b[^>]*>([\s\S]*?)<\/a>/gi;
+  while ((m = titleRe.exec(html)) !== null) {
+    const cls = m[0].match(/\bclass\s*=\s*["']([^"']+)["']/i)?.[1] || "";
+    if (/(^|\s)album-title(\s|$)/i.test(cls)) titles.push(cleanHtmlText(m[1]));
+  }
+  const thumbs = [];
+  const imgRe = /<img\b[^>]*>/gi;
+  while ((m = imgRe.exec(html)) !== null) {
+    const tag = m[0];
+    const cls = tag.match(/\bclass\s*=\s*["']([^"']+)["']/i)?.[1] || "";
+    if (!/(^|\s)album-thumbnail(\s|$)/i.test(cls)) continue;
+    const src = tag.match(/\b(?:data-src|src)\s*=\s*["']([^"']+)["']/i);
+    thumbs.push(src ? absoluteEromeUrl(src[1]) : "");
+  }
+  return links.map((url, i) => ({ url, title: titles[i] || `Álbum Erome ${i + 1}`, thumb: thumbs[i] || "" }));
+}
+
+async function getEromeAlbumCard(url) {
+  const html = await fetchEromePage(url);
+  const titleMatch = html.match(/<meta\s+property=["']og:title["']\s+content=["']([^"']+)/i) || html.match(/<title[^>]*>([\s\S]*?)<\/title>/i) || html.match(/<h1[^>]*>([\s\S]*?)<\/h1>/i);
+  const thumbMatch = html.match(/<meta\s+property=["']og:image["']\s+content=["']([^"']+)/i) || html.match(/<video[^>]+poster=["']([^"']+)/i);
+  const videoCount = (html.match(/<video\b/gi) || []).length;
+  const imageCount = (html.match(/class=["'][^"']*\bimg\b[^"']*["']/gi) || []).length;
+  return {
+    url,
+    title: cleanHtmlText(titleMatch ? titleMatch[1] : "Álbum Erome"),
+    thumb: thumbMatch ? absoluteEromeUrl(thumbMatch[1]) : "",
+    count: Math.max(videoCount, 0) + Math.max(imageCount, 0)
+  };
+}
+
+async function handleErome(sock, jid, query) {
+  if (!query || query.length < 2) {
+    return sock.sendMessage(jid, { text: "🔎 Uso:\n.erome término de búsqueda\n.erome https://www.erome.com/a/ID\n\nSolo se consultan álbumes públicos." });
+  }
+  try {
+    let albums = [];
+    if (/^https?:\/\//i.test(query.trim())) {
+      const url = absoluteEromeUrl(query.trim());
+      if (!url || !/\/a\/[A-Za-z0-9_-]+(?:$|[/?#])/i.test(new URL(url).pathname + new URL(url).search)) {
+        return sock.sendMessage(jid, { text: "❌ Enlace de álbum Erome no válido. Usa https://www.erome.com/a/ID" });
+      }
+      albums = [await getEromeAlbumCard(url)];
+    } else {
+      const searchUrl = `https://www.erome.com/search?q=${encodeURIComponent(query.slice(0, 100))}&page=1`;
+      const html = await fetchEromePage(searchUrl);
+      albums = parseEromeSearch(html).slice(0, 5);
+      if (!albums.length) return sock.sendMessage(jid, { text: `🔎 No encontré álbumes públicos para: ${query}` });
+    }
+
+    await sock.sendMessage(jid, {
+      text: `🔞 *EROME — ÁLBUMES*\n🔎 ${query.slice(0, 100)}\n📄 ${albums.length} resultado(s)\n⚠️ Solo contenido público para mayores de 18 años.`
+    });
+
+    for (const [index, album] of albums.entries()) {
+      let details = album;
+      if (!details.count && /^https?:\/\//i.test(details.url)) {
+        try { details = await getEromeAlbumCard(details.url); } catch (_) {}
+      }
+      const title = String(details.title || `Álbum Erome ${index + 1}`).replace(/[\r\n]+/g, " ").slice(0, 180);
+      const countText = details.count ? `📁 Elementos detectados: ${details.count}` : "📁 Álbum público";
+      const caption = `╭─「 🔞 *EROME ${index + 1}* 」\n│ 📚 *${title}*\n│ ${countText}\n╰──────────────\n⚠️ Solo mayores de 18 años.`;
+      if (details.thumb) await sock.sendMessage(jid, { image: { url: details.thumb }, caption });
+      else await sock.sendMessage(jid, { text: caption });
+      try {
+        if (!sendInteractiveButtons) throw new Error("baileys_helper no está instalado");
+        await sendInteractiveButtons(sock, jid, {
+          text: `📥 *OPCIONES — Erome ${index + 1}*\nDescarga el álbum público completo.`,
+          footer: "DEXTER MODZ • Descarga de álbum",
+          buttons: [{ id: `.eromedownload ${details.url}`, text: "⬇️ DESCARGAR ÁLBUM" }]
+        });
+      } catch (buttonError) {
+        log("[EROME BUTTONS]", buttonError.message);
+        await sock.sendMessage(jid, { text: `⬇️ *DESCARGAR ÁLBUM ${index + 1}*\n.eromedownload ${details.url}\n\n🔗 Abrir: ${details.url}` });
+      }
+    }
+  } catch (error) {
+    log("[EROME SEARCH]", error.message);
+    return sock.sendMessage(jid, { text: "❌ No pude consultar Erome. Puede estar temporalmente inaccesible o haber cambiado su página. Intenta más tarde." });
+  }
+}
+
+async function handleEromeDownload(sock, jid, albumUrl) {
+  const url = absoluteEromeUrl(albumUrl);
+  if (!url || !/\/a\/[A-Za-z0-9_-]+(?:$|[/?#])/i.test(new URL(url).pathname + new URL(url).search)) {
+    return sock.sendMessage(jid, { text: "❌ Enlace de álbum Erome no válido." });
+  }
+  if (activeDownloads.has(jid)) {
+    return sock.sendMessage(jid, { text: "⏳ Ya tienes una descarga en proceso en este chat." });
+  }
+
+  let jobDir = null;
+  let archivePath = null;
+  activeDownloads.add(jid);
+  try {
+    jobDir = fs.mkdtempSync(path.join(TEMP_DIR, "erome-"));
+    await sock.sendMessage(jid, { text: "📥 *EROME — DESCARGA DE ÁLBUM*\n⏳ Descargando imágenes y videos públicos. Los archivos se guardarán temporalmente en Render y se eliminarán al terminar el envío." });
+    await runProcess("gallery-dl", ["--directory", jobDir, url], 0);
+
+    const files = [];
+    const walk = dir => {
+      for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+        const full = path.join(dir, entry.name);
+        if (entry.isDirectory()) walk(full);
+        else if (entry.isFile() && full !== archivePath) files.push(full);
+      }
+    };
+    walk(jobDir);
+    if (!files.length) throw new Error("gallery-dl no encontró archivos descargables en el álbum.");
+
+    archivePath = path.join(TEMP_DIR, `erome-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.tar.gz`);
+    await runProcess("tar", ["-czf", archivePath, "-C", jobDir, "."], 0);
+    const stats = fs.statSync(archivePath);
+    if (!stats.size) throw new Error("El archivo temporal del álbum quedó vacío.");
+
+    await sock.sendMessage(jid, {
+      document: { url: archivePath },
+      mimetype: "application/gzip",
+      fileName: `DEXTER_MODZ_EROME_${files.length}_archivos.tar.gz`,
+      caption: `✅ *ÁLBUM EROME LISTO*\n📁 Archivos: ${files.length}\n💾 Tamaño: ${formatBytes(stats.size)}\n🧹 El archivo temporal se eliminará del servidor después del envío.`
+    });
+  } catch (error) {
+    log("[EROME DOWNLOAD]", error.message);
+    await sock.sendMessage(jid, { text: `❌ No se pudo descargar el álbum Erome.\n${String(error.message || error).slice(0, 500)}\n\nComprueba que sea un álbum público y que Render tenga gallery-dl instalado.` });
+  } finally {
+    activeDownloads.delete(jid);
+    if (archivePath) { try { fs.rmSync(archivePath, { force: true }); } catch (_) {} }
+    if (jobDir) { try { fs.rmSync(jobDir, { recursive: true, force: true }); } catch (_) {} }
+  }
+}
+
+// ======================================================
 // MENU (formato Luno Bot, con "reenviado de canal")
 // ======================================================
 
@@ -2108,7 +2274,7 @@ function getMenu() {
   });
   const cmds = list => list.map(c => `> *${c}*`).join("\n");
   const sections = [
-    ["DESCARGAS", [".play", ".ytmp4", ".fb", ".ig", ".tiktok", ".xvideos", ".pornhub"]],
+    ["DESCARGAS", [".play", ".ytmp4", ".fb", ".ig", ".tiktok", ".xvideos", ".pornhub", ".erome"]],
     ["STICKERS", [".s", ".toimg"]],
     ["TEXTOS", [".negrita", ".cursiva", ".tachado", ".subrayada"]],
     ["JUEGOS", [".ahorcado", ".v/f", ".trivia", ".respuesta", ".ppt", ".dados", ".moneda", ".8ball", ".ship"]],
@@ -2170,7 +2336,7 @@ const KNOWN_COMMANDS = new Set([
   "negrita", "cursiva", "tachado", "subrayada",
   "ahorcado", "v/f", "vf", "v", "f",
   "abrir", "cerrar", "invocar", "tag", "tagall", "hidetag", "admins", "infogrupo", "warn", "kick", "promote", "demote", "encuesta", "sorteo",
-  "play", "ytmp4", "fb", "ig", "tiktok", "xvideos", "xvdownload", "pornhub", "phdownload",
+  "play", "ytmp4", "fb", "ig", "tiktok", "xvideos", "xvdownload", "pornhub", "phdownload", "erome", "eromedownload",
   "hola", "menu", "help", "comandos", "ping", "info", "uptime", "runtime",
   "code", "delsesion", "dados", "moneda", "8ball", "ppt", "ship", "trivia", "respuesta", "mayus", "upper", "minus", "lower", "reverse", "contar", "base64", "random", "status", "ram", "disk", "version", "changelog"
 ]);
@@ -2278,6 +2444,15 @@ async function handleMessage(sock, msg, ctx = {}) {
         return sock.sendMessage(jid, { text: "❌ Enlace de Pornhub no válido." });
       }
       return heavy(sock, jid, () => downloadAndSend(sock, jid, url, "video", "pornhub"));
+    }
+
+    // Buscador Erome (18+), solo álbumes públicos.
+    case cmd === "erome":
+      return heavy(sock, jid, () => handleErome(sock, jid, args));
+    // Descarga el álbum público completo en un archivo temporal.
+    case cmd === "eromedownload": {
+      const url = args.split(/\s+/)[0];
+      return heavy(sock, jid, () => handleEromeDownload(sock, jid, url));
     }
 
     // El botón de cada resultado responde con .xvdownload + URL.
