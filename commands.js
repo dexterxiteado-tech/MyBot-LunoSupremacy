@@ -798,8 +798,12 @@ const REACT_EMOJI = /^(off|none|no|0)$/i.test(REACT_RAW) ? "" : REACT_RAW;
 const BOT_VERSION = process.env.BOT_VERSION || "v.1.0.0";
 const BOT_FOOTER = process.env.BOT_FOOTER || "by Dxx Modz";
 const YOUTUBE_LINK = process.env.YOUTUBE_LINK || "";
-const CHANNEL_JID = process.env.CHANNEL_JID || "";          // 120363...@newsletter
-const CHANNEL_NAME = "愛 PAPI DEX 愛";
+const CHANNEL_JID = process.env.CHANNEL_JID || "";          // Opcional: 120363...@newsletter
+const CHANNEL_INVITE_URL = process.env.CHANNEL_INVITE_URL || "https://whatsapp.com/channel/0029Vb7jQB43mFY68g0CEA1U";
+const CHANNEL_POST_ID = Number(process.env.CHANNEL_POST_ID || 1957);
+const CHANNEL_NAME = "Dxx Modz";
+let resolvedChannelMetadata = null;
+let channelMetadataPromise = null;
 const MENU_IMAGE_URL = process.env.MENU_IMAGE_URL || "";
 const MENU_IMAGE_FILE = ["menu.jpg", "menu.jpeg", "menu.png"]
   .map(n => path.join(__dirname, n))
@@ -2485,27 +2489,60 @@ function getMenu() {
   return out.join("\n");
 }
 
-function channelContext() {
-  if (!CHANNEL_JID) return undefined;
+async function resolveChannelMetadata(sock) {
+  if (CHANNEL_JID) {
+    return { id: CHANNEL_JID, name: CHANNEL_NAME };
+  }
+  if (resolvedChannelMetadata) return resolvedChannelMetadata;
+  if (!channelMetadataPromise) {
+    channelMetadataPromise = (async () => {
+      const match = CHANNEL_INVITE_URL.match(/\/channel\/([^/?#]+)/i);
+      if (!match) throw new Error("CHANNEL_INVITE_URL no contiene un código de canal válido");
+      if (typeof sock.newsletterMetadata !== "function") {
+        throw new Error("Esta versión de Baileys no ofrece newsletterMetadata()");
+      }
+      const metadata = await sock.newsletterMetadata("invite", match[1]);
+      if (!metadata?.id || !String(metadata.id).endsWith("@newsletter")) {
+        throw new Error("WhatsApp no devolvió un JID válido para el canal");
+      }
+      resolvedChannelMetadata = { id: metadata.id, name: metadata.name || CHANNEL_NAME };
+      log("[CANAL] JID resuelto:", resolvedChannelMetadata.id, "| Nombre:", resolvedChannelMetadata.name);
+      return resolvedChannelMetadata;
+    })().catch(error => {
+      channelMetadataPromise = null;
+      throw error;
+    });
+  }
+  return channelMetadataPromise;
+}
+
+function channelContext(metadata) {
+  if (!metadata?.id) return undefined;
   return {
     isForwarded: true,
     forwardingScore: 999,
     forwardedNewsletterMessageInfo: {
-      newsletterJid: CHANNEL_JID,
-      newsletterName: CHANNEL_NAME,
-      serverMessageId: 100
+      newsletterJid: metadata.id,
+      newsletterName: metadata.name || CHANNEL_NAME,
+      serverMessageId: CHANNEL_POST_ID
     }
   };
 }
 
 async function sendMenu(sock, jid) {
   const caption = getMenu();
-  const contextInfo = channelContext();
   const image = MENU_IMAGE_FILE ? { url: MENU_IMAGE_FILE }
     : MENU_IMAGE_URL ? { url: MENU_IMAGE_URL } : null;
   try {
-    if (image) await sock.sendMessage(jid, { image, caption, contextInfo });
-    else await sock.sendMessage(jid, { text: caption, contextInfo });
+    let metadata;
+    try {
+      metadata = await resolveChannelMetadata(sock);
+    } catch (error) {
+      log("[CANAL] No se pudo resolver el JID automáticamente:", error.message);
+    }
+    const contextInfo = channelContext(metadata);
+    if (image) await sock.sendMessage(jid, { image, caption, ...(contextInfo ? { contextInfo } : {}) });
+    else await sock.sendMessage(jid, { text: caption, ...(contextInfo ? { contextInfo } : {}) });
   } catch (e) {
     log("[MENU]", e.message);
     await sock.sendMessage(jid, { text: caption });
