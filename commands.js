@@ -315,6 +315,36 @@ const NSFW_CATEGORIES = {
 };
 const NSFW_INDEX_DIR = "nsfw";
 const GITHUB_API = "https://api.github.com";
+// Bolsa aleatoria por categoría: cada imagen sale una vez antes de repetir ciclo.
+const nsfwShuffleBags = new Map();
+// Evita responder dos veces si Baileys entrega el mismo comando desde dos sockets.
+const nsfwCommandMessageIds = new Map();
+
+function pickNsfwRandomItem(category, items) {
+  const validItems = items.filter(item => item?.url && /^https:\/\//i.test(item.url));
+  if (!validItems.length) return null;
+
+  const signature = validItems.map(item => item.url).sort().join("|");
+  let bag = nsfwShuffleBags.get(category);
+  if (!bag || bag.signature !== signature || !bag.remaining.length) {
+    const shuffled = [...validItems];
+    for (let i = shuffled.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+    }
+    // Evita que el primer elemento de un ciclo sea el último del ciclo anterior.
+    if (shuffled.length > 1 && bag?.lastUrl && shuffled[shuffled.length - 1].url === bag.lastUrl) {
+      const swapIndex = Math.floor(Math.random() * (shuffled.length - 1));
+      [shuffled[swapIndex], shuffled[shuffled.length - 1]] = [shuffled[shuffled.length - 1], shuffled[swapIndex]];
+    }
+    bag = { signature, remaining: shuffled, lastUrl: bag?.lastUrl || null };
+    nsfwShuffleBags.set(category, bag);
+  }
+
+  const item = bag.remaining.pop();
+  bag.lastUrl = item.url;
+  return item;
+}
 
 function nsfwConfig() {
   const required = ["IMGPILE_API_KEY", "GITHUB_TOKEN", "GITHUB_OWNER", "GITHUB_REPO"];
@@ -465,15 +495,25 @@ ${String(error.message || error).slice(0, 450)}${suffix}` });
   }
 }
 
-async function handleNsfwRandom(sock, jid, category) {
+async function handleNsfwRandom(sock, jid, category, messageId) {
   try {
+    if (messageId) {
+      const dedupeKey = `${jid}:${category}:${messageId}`;
+      const now = Date.now();
+      for (const [key, timestamp] of nsfwCommandMessageIds) {
+        if (now - timestamp > 10 * 60 * 1000) nsfwCommandMessageIds.delete(key);
+      }
+      if (nsfwCommandMessageIds.has(dedupeKey)) return;
+      nsfwCommandMessageIds.set(dedupeKey, now);
+      if (nsfwCommandMessageIds.size > 2000) nsfwCommandMessageIds.delete(nsfwCommandMessageIds.keys().next().value);
+    }
     const index = await readNsfwIndex(category);
     if (!index.items.length) {
       await sock.sendMessage(jid, { text: `📂 Todavía no hay imágenes en la categoría *${NSFW_CATEGORIES[category].label}*. ` });
       return;
     }
-    const item = index.items[Math.floor(Math.random() * index.items.length)];
-    if (!item?.url || !/^https:\/\//i.test(item.url)) throw new Error("El registro seleccionado no tiene una URL válida.");
+    const item = pickNsfwRandomItem(category, index.items);
+    if (!item?.url) throw new Error("No hay imágenes con URL válida en el catálogo.");
     const commandCaption = category === "tetas" ? ".tetas" : ".culos";
     await sock.sendMessage(jid, {
       image: { url: item.url },
@@ -2645,9 +2685,9 @@ async function handleMessage(sock, msg, ctx = {}) {
     case cmd === "addculos":
       return heavy(sock, jid, () => handleNsfwAdd(sock, msg, jid, "culos"));
     case cmd === "tetas":
-      return heavy(sock, jid, () => handleNsfwRandom(sock, jid, "tetas"));
+      return heavy(sock, jid, () => handleNsfwRandom(sock, jid, "tetas", msg.key?.id));
     case cmd === "culos":
-      return heavy(sock, jid, () => handleNsfwRandom(sock, jid, "culos"));
+      return heavy(sock, jid, () => handleNsfwRandom(sock, jid, "culos", msg.key?.id));
 
     // Stickers y multimedia
     case cmd === "s" || cmd === "sticker":
