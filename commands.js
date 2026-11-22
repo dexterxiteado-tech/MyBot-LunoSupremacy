@@ -2536,23 +2536,46 @@ function tiktokMediaUrl(video) {
 
 async function fetchTikTokSearchPage(query, cursor = 0) {
   const url = new URL(TIKWM_SEARCH_URL);
-  url.searchParams.set("keywords", query);
-  url.searchParams.set("count", "10");
-  url.searchParams.set("cursor", String(cursor || 0));
-  url.searchParams.set("web", "1");
-  url.searchParams.set("hd", "1");
-  const response = await fetch(url, {
-    headers: {
-      accept: "application/json, text/plain, */*",
-      "accept-language": "es-MX,es;q=0.9,en;q=0.8",
-      "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36"
-    },
-    signal: AbortSignal.timeout(25000)
+  const params = new URLSearchParams({
+    keywords: query,
+    count: "10",
+    cursor: String(cursor || 0),
+    web: "1",
+    hd: "1"
   });
-  if (!response.ok) throw new Error(`TikWM respondió HTTP ${response.status}`);
-  const json = await response.json();
+  const headers = {
+    accept: "application/json, text/plain, */*",
+    "accept-language": "es-MX,es;q=0.9,en;q=0.8",
+    "content-type": "application/x-www-form-urlencoded; charset=UTF-8",
+    origin: "https://www.tikwm.com",
+    referer: "https://www.tikwm.com/",
+    "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36"
+  };
+
+  // TikWM acepta GET/POST; usamos POST (también usado por integraciones
+  // recientes) y dejamos GET como compatibilidad si el servidor lo rechaza.
+  let response = await fetch(url, {
+    method: "POST",
+    headers,
+    body: params,
+    signal: AbortSignal.timeout(18000)
+  });
+  if ([404, 405, 501].includes(response.status)) {
+    const getUrl = new URL(url);
+    for (const [key, value] of params) getUrl.searchParams.set(key, value);
+    response = await fetch(getUrl, {
+      method: "GET",
+      headers: { ...headers, "content-type": "application/json" },
+      signal: AbortSignal.timeout(12000)
+    });
+  }
+  const raw = await response.text();
+  if (!response.ok) throw new Error(`TikWM respondió HTTP ${response.status}: ${raw.slice(0, 160)}`);
+  let json;
+  try { json = JSON.parse(raw); }
+  catch (_) { throw new Error(`TikWM no devolvió JSON válido: ${raw.slice(0, 160) || "respuesta vacía"}`); }
   if (json?.code !== undefined && Number(json.code) !== 0) {
-    throw new Error(json.msg || "TikWM no pudo realizar la búsqueda.");
+    throw new Error(json.msg || `TikWM devolvió código ${json.code}.`);
   }
   const data = json?.data || {};
   const videos = Array.isArray(data.videos) ? data.videos : (Array.isArray(data.list) ? data.list : []);
@@ -2664,8 +2687,12 @@ async function handleTikTokSearch(sock, jid, query) {
     await sock.sendMessage(jid, { text: `🔎 Buscando vídeos de TikTok para: *${clean}*...` });
     await sendTikTokSearchResult(sock, jid, session);
   } catch (error) {
-    log("[TIKTOK SEARCH]", error.message);
-    await sock.sendMessage(jid, `❌ No pude buscar en TikTok. El servicio de búsqueda puede estar temporalmente limitado.\n\n${String(error.message || error).slice(0, 250)}`);
+    log("[TIKTOK SEARCH]", error?.stack || error?.message || error);
+    try {
+      await sock.sendMessage(jid, { text: `❌ No pude completar la búsqueda de TikTok.\n\nMotivo: ${String(error.message || error).slice(0, 300)}\n\nPuedes intentarlo de nuevo en unos segundos.` });
+    } catch (sendError) {
+      log("[TIKTOK SEARCH ERROR MESSAGE]", sendError?.message || sendError);
+    }
   }
 }
 
