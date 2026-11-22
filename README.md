@@ -46,3 +46,12 @@ Los comandos que necesitan servicios externos/API (por ejemplo IA, Google, Shaza
 - `.eromedownload URL`: descarga el álbum público completo (imágenes y videos) en un archivo temporal.
 - Render instala `gallery-dl` durante la construcción Docker. El archivo temporal se elimina después de enviarse.
 - No se accede a álbumes privados ni se eluden controles de acceso.
+
+### Catálogo de imágenes (ImgPile + GitHub)
+
+- `.addtetas` y `.addculos`: responde a una imagen con el comando para subirla a ImgPile y guardar su referencia en `nsfw/tetas.json` o `nsfw/culos.json` del repositorio.
+- `.tetas` y `.culos`: envían una imagen aleatoria del catálogo. Están disponibles para todos los chats.
+- Las altas están restringidas al propietario. Configura `OWNER_NUMBER` con tu número de WhatsApp en formato internacional, solo dígitos (por ejemplo `5212345678901`). También se reconocen mensajes enviados desde la propia cuenta vinculada (`fromMe`).
+- Variables de entorno necesarias en Render: `IMGPILE_API_KEY`, `GITHUB_TOKEN`, `GITHUB_OWNER`, `GITHUB_REPO`, `GITHUB_BRANCH` (normalmente `main`) y `OWNER_NUMBER`.
+- El token de GitHub necesita permiso **Contents: Read and write** en ese repositorio. Las imágenes se alojan en ImgPile; GitHub solo guarda el índice JSON.
+- Usa únicamente imágenes de personas adultas que hayan consentido expresamente su distribución y para las que tengas derecho de publicación. Nunca subas imágenes íntimas no consentidas ni contenido de menores.

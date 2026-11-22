@@ -305,6 +305,190 @@ async function downloadMediaBuffer(target) {
 }
 
 // ======================================================
+// CATALOGO NSFW: ImgPile (archivos) + GitHub (indice JSON)
+// Solo añadir desde el propietario; consulta aleatoria pública.
+// ======================================================
+
+const NSFW_CATEGORIES = {
+  tetas: { label: "Tetas", file: "tetas.json" },
+  culos: { label: "Culos", file: "culos.json" }
+};
+const NSFW_INDEX_DIR = "nsfw";
+const GITHUB_API = "https://api.github.com";
+
+function nsfwConfig() {
+  const required = ["IMGPILE_API_KEY", "GITHUB_TOKEN", "GITHUB_OWNER", "GITHUB_REPO"];
+  const missing = required.filter(k => !String(process.env[k] || "").trim());
+  if (missing.length) throw new Error("Faltan variables de Render: " + missing.join(", "));
+  return {
+    imgpileKey: process.env.IMGPILE_API_KEY.trim(),
+    githubToken: process.env.GITHUB_TOKEN.trim(),
+    owner: process.env.GITHUB_OWNER.trim(),
+    repo: process.env.GITHUB_REPO.trim(),
+    branch: (process.env.GITHUB_BRANCH || "main").trim()
+  };
+}
+
+function githubContentUrl(cfg, filePath) {
+  const safePath = filePath.split("/").map(encodeURIComponent).join("/");
+  return `${GITHUB_API}/repos/${encodeURIComponent(cfg.owner)}/${encodeURIComponent(cfg.repo)}/contents/${safePath}?ref=${encodeURIComponent(cfg.branch)}`;
+}
+
+async function githubRequest(url, cfg, options = {}) {
+  const response = await fetch(url, {
+    ...options,
+    headers: {
+      "Accept": "application/vnd.github+json",
+      "Authorization": `Bearer ${cfg.githubToken}`,
+      "X-GitHub-Api-Version": "2022-11-28",
+      ...(options.headers || {})
+    }
+  });
+  const raw = await response.text();
+  let data = {};
+  try { data = raw ? JSON.parse(raw) : {}; } catch (_) {}
+  if (!response.ok) {
+    const detail = data.message || raw || `HTTP ${response.status}`;
+    throw new Error(`GitHub ${response.status}: ${String(detail).slice(0, 220)}`);
+  }
+  return data;
+}
+
+async function readNsfwIndex(category) {
+  const cfg = nsfwConfig();
+  const definition = NSFW_CATEGORIES[category];
+  const filePath = `${NSFW_INDEX_DIR}/${definition.file}`;
+  const response = await fetch(githubContentUrl(cfg, filePath), {
+    headers: {
+      "Accept": "application/vnd.github+json",
+      "Authorization": `Bearer ${cfg.githubToken}`,
+      "X-GitHub-Api-Version": "2022-11-28"
+    }
+  });
+  if (response.status === 404) return { cfg, filePath, sha: null, items: [] };
+  const raw = await response.text();
+  let data;
+  try { data = JSON.parse(raw); } catch (_) { throw new Error("GitHub devolvió una respuesta JSON inválida."); }
+  if (!response.ok) throw new Error(`GitHub ${response.status}: ${data.message || raw}`);
+  if (!data.content) throw new Error("El índice de GitHub no contiene datos legibles.");
+  const decoded = Buffer.from(data.content.replace(/\s/g, ""), "base64").toString("utf8");
+  const parsed = JSON.parse(decoded);
+  return { cfg, filePath, sha: data.sha, items: Array.isArray(parsed) ? parsed : (Array.isArray(parsed.items) ? parsed.items : []) };
+}
+
+async function writeNsfwIndex(index, items, category) {
+  const payload = {
+    message: `DEXTER MODZ: agregar imagen a ${category}`,
+    content: Buffer.from(JSON.stringify(items, null, 2), "utf8").toString("base64"),
+    branch: index.cfg.branch
+  };
+  if (index.sha) payload.sha = index.sha;
+  await githubRequest(githubContentUrl(index.cfg, index.filePath), index.cfg, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload)
+  });
+}
+
+async function uploadToImgPile(buffer, mimetype, filename, cfg) {
+  const endpoint = new URL("https://imgpile.com/uploads");
+  endpoint.searchParams.set("filename", filename);
+  const response = await fetch(endpoint, {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${cfg.imgpileKey}`,
+      "Content-Type": mimetype || "application/octet-stream"
+    },
+    body: buffer
+  });
+  const raw = await response.text();
+  let data;
+  try { data = JSON.parse(raw); } catch (_) { data = {}; }
+  if (!response.ok) {
+    throw new Error(`ImgPile ${response.status}: ${data.message || data.error || raw || "No se pudo subir la imagen."}`);
+  }
+  const media = data.data || data.media || data;
+  const url = media.urls?.original || media.url || data.url;
+  if (!url || !/^https:\/\//i.test(url)) throw new Error("ImgPile no devolvió una URL directa válida.");
+  return { url, pageUrl: media.pageUrl || media.page_url || "", slug: media.slug || "" };
+}
+
+async function handleNsfwAdd(sock, msg, jid, category) {
+  if (!isOwner(msg, jid, sock)) {
+    await sock.sendMessage(jid, { text: "⛔ Este comando solo puede usarlo el propietario del bot." });
+    return;
+  }
+  const target = getMediaTarget(msg.message);
+  if (!target || target.kind !== "image" || !String(target.mimetype || "").startsWith("image/")) {
+    await sock.sendMessage(jid, {
+      text: `🖼️ Responde a una *imagen* con .add${category} para guardarla.
+
+⚠️ Solo imágenes de personas adultas y compartidas con consentimiento explícito. No subas contenido íntimo de terceros sin permiso.`
+    });
+    return;
+  }
+
+  let uploaded = null;
+  try {
+    await sock.sendMessage(jid, { text: `⏳ Subiendo imagen a ImgPile y registrándola en GitHub...` });
+    const index = await readNsfwIndex(category);
+    const buffer = await downloadMediaBuffer(target);
+    const ext = extensionFromMime(target.mimetype, ".jpg").replace(/^\./, "");
+    const number = index.items.length + 1;
+    const logicalName = `${NSFW_CATEGORIES[category].label}${number}.${ext}`;
+    uploaded = await uploadToImgPile(buffer, target.mimetype, logicalName, index.cfg);
+    const item = {
+      name: logicalName,
+      url: uploaded.url,
+      pageUrl: uploaded.pageUrl || null,
+      slug: uploaded.slug || null,
+      uploadedAt: new Date().toISOString()
+    };
+    index.items.push(item);
+    await writeNsfwIndex(index, index.items, category);
+    await sock.sendMessage(jid, {
+      text: `✅ *IMAGEN REGISTRADA*
+
+📁 Categoría: ${NSFW_CATEGORIES[category].label}
+🏷️ Nombre: ${logicalName}
+🔢 Total: ${index.items.length}
+☁️ ImgPile + GitHub sincronizados.`
+    });
+  } catch (error) {
+    log(`[NSFW ${category}]`, error.message);
+    const suffix = uploaded?.url ? `
+
+La imagen sí se subió a ImgPile, pero no se pudo guardar en GitHub:
+${uploaded.url}` : "";
+    await sock.sendMessage(jid, { text: `❌ No se pudo registrar la imagen.
+${String(error.message || error).slice(0, 450)}${suffix}` });
+  }
+}
+
+async function handleNsfwRandom(sock, jid, category) {
+  try {
+    const index = await readNsfwIndex(category);
+    if (!index.items.length) {
+      await sock.sendMessage(jid, { text: `📂 Todavía no hay imágenes en la categoría *${NSFW_CATEGORIES[category].label}*. ` });
+      return;
+    }
+    const item = index.items[Math.floor(Math.random() * index.items.length)];
+    if (!item?.url || !/^https:\/\//i.test(item.url)) throw new Error("El registro seleccionado no tiene una URL válida.");
+    await sock.sendMessage(jid, {
+      image: { url: item.url },
+      caption: `☪️ *Luno Supremacy* ☪️
+🏷️ ${item.name || NSFW_CATEGORIES[category].label}
+
+👤 By Dxx Modz`
+    });
+  } catch (error) {
+    log(`[NSFW RANDOM ${category}]`, error.message);
+    await sock.sendMessage(jid, { text: `❌ No pude obtener una imagen de ${category}.
+${String(error.message || error).slice(0, 350)}` });
+  }
+}
+
+// ======================================================
 // STICKER
 // ======================================================
 
@@ -2275,6 +2459,7 @@ function getMenu() {
   const cmds = list => list.map(c => `> *${c}*`).join("\n");
   const sections = [
     ["DESCARGAS", [".play", ".ytmp4", ".fb", ".ig", ".tiktok", ".xvideos", ".pornhub", ".erome"]],
+    ["CATÁLOGO", [".tetas", ".culos", ".addtetas (owner)", ".addculos (owner)"]],
     ["STICKERS", [".s", ".toimg"]],
     ["TEXTOS", [".negrita", ".cursiva", ".tachado", ".subrayada"]],
     ["JUEGOS", [".ahorcado", ".v/f", ".trivia", ".respuesta", ".ppt", ".dados", ".moneda", ".8ball", ".ship"]],
@@ -2332,7 +2517,7 @@ const lastCommandAt = new Map();
 const pendingJobs = new Set();
 const COOLDOWN_MS = 1500;
 const KNOWN_COMMANDS = new Set([
-  "s", "sticker", "toimg", "toaudio", "qr",
+  "s", "sticker", "toimg", "toaudio", "qr", "addtetas", "addculos", "tetas", "culos",
   "negrita", "cursiva", "tachado", "subrayada",
   "ahorcado", "v/f", "vf", "v", "f",
   "abrir", "cerrar", "invocar", "tag", "tagall", "hidetag", "admins", "infogrupo", "warn", "kick", "promote", "demote", "encuesta", "sorteo",
@@ -2413,6 +2598,16 @@ async function handleMessage(sock, msg, ctx = {}) {
   }
 
   switch (true) {
+    // Catálogo de imágenes: consulta pública, altas solo del propietario.
+    case cmd === "addtetas":
+      return heavy(sock, jid, () => handleNsfwAdd(sock, msg, jid, "tetas"));
+    case cmd === "addculos":
+      return heavy(sock, jid, () => handleNsfwAdd(sock, msg, jid, "culos"));
+    case cmd === "tetas":
+      return heavy(sock, jid, () => handleNsfwRandom(sock, jid, "tetas"));
+    case cmd === "culos":
+      return heavy(sock, jid, () => handleNsfwRandom(sock, jid, "culos"));
+
     // Stickers y multimedia
     case cmd === "s" || cmd === "sticker":
       return heavy(sock, jid, () => handleSticker(sock, jid, msg.message));
