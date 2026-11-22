@@ -2497,6 +2497,209 @@ async function handleEromeDownload(sock, jid, albumUrl) {
 }
 
 // ======================================================
+// BUSCADOR TIKTOK: un resultado por mensaje + Download/Siguiente.
+// Usa el endpoint público no oficial de TikWM; puede cambiar o limitar solicitudes.
+// ======================================================
+const tiktokSearchSessions = new Map();
+const tiktokSearchSeen = new Map();
+const TIKWM_SEARCH_URL = process.env.TIKTOK_SEARCH_API_URL || "https://www.tikwm.com/api/feed/search";
+
+function shuffleArray(items) {
+  const out = items.slice();
+  for (let i = out.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [out[i], out[j]] = [out[j], out[i]];
+  }
+  return out;
+}
+
+function tiktokVideoId(video) {
+  return String(video?.video_id || video?.id || video?.aweme_id || "");
+}
+
+function tiktokPostUrl(video) {
+  const direct = [video?.share_url, video?.web_url, video?.url, video?.video_url]
+    .find(value => typeof value === "string" && hostMatches(value, "tiktok.com"));
+  if (direct) return direct;
+  const id = tiktokVideoId(video);
+  const username = video?.author?.unique_id || video?.author?.username || video?.unique_id;
+  if (id && username) return `https://www.tiktok.com/@${encodeURIComponent(String(username).replace(/^@/, ""))}/video/${encodeURIComponent(id)}`;
+  return "";
+}
+
+function tiktokMediaUrl(video) {
+  const value = video?.hdplay || video?.play || video?.wmplay || video?.video?.play_addr?.url_list?.[0];
+  if (!value) return "";
+  if (/^https?:\/\//i.test(value)) return value;
+  return `https://www.tikwm.com${String(value).startsWith("/") ? "" : "/"}${value}`;
+}
+
+async function fetchTikTokSearchPage(query, cursor = 0) {
+  const url = new URL(TIKWM_SEARCH_URL);
+  url.searchParams.set("keywords", query);
+  url.searchParams.set("count", "10");
+  url.searchParams.set("cursor", String(cursor || 0));
+  url.searchParams.set("web", "1");
+  url.searchParams.set("hd", "1");
+  const response = await fetch(url, {
+    headers: {
+      accept: "application/json, text/plain, */*",
+      "accept-language": "es-MX,es;q=0.9,en;q=0.8",
+      "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36"
+    },
+    signal: AbortSignal.timeout(25000)
+  });
+  if (!response.ok) throw new Error(`TikWM respondió HTTP ${response.status}`);
+  const json = await response.json();
+  if (json?.code !== undefined && Number(json.code) !== 0) {
+    throw new Error(json.msg || "TikWM no pudo realizar la búsqueda.");
+  }
+  const data = json?.data || {};
+  const videos = Array.isArray(data.videos) ? data.videos : (Array.isArray(data.list) ? data.list : []);
+  return {
+    videos: videos.filter(video => video && (tiktokVideoId(video) || tiktokMediaUrl(video))),
+    cursor: data.cursor ?? data.next_cursor ?? data.max_cursor ?? null,
+    hasMore: Boolean(data.hasMore ?? data.has_more ?? data.has_more_videos ?? false) ||
+      (data.cursor !== undefined && data.cursor !== null && String(data.cursor) !== "" && String(data.cursor) !== "0")
+  };
+}
+
+async function loadFreshTikTokResults(session, needed = 1) {
+  let attempts = 0;
+  while (session.results.length - session.index < needed && attempts < 4) {
+    attempts++;
+    const page = await fetchTikTokSearchPage(session.query, session.cursor);
+    const fresh = page.videos.filter(video => {
+      const id = tiktokVideoId(video) || tiktokPostUrl(video) || tiktokMediaUrl(video);
+      if (!id || session.seen.has(id) || session.queued.has(id)) return false;
+      session.queued.add(id);
+      return true;
+    });
+    session.results.push(...shuffleArray(fresh));
+    session.cursor = page.cursor;
+    session.hasMore = Boolean(page.hasMore || page.cursor);
+    if (!page.videos.length || !session.hasMore) break;
+  }
+  return session.results.length > session.index;
+}
+
+async function sendTikTokSearchResult(sock, jid, session) {
+  if (!(await loadFreshTikTokResults(session))) {
+    return sock.sendMessage(jid, {
+      text: `😅 No encontré más vídeos nuevos para *${session.query}*.\nPrueba otra búsqueda o inténtalo más tarde.`
+    });
+  }
+  const video = session.results[session.index++];
+  const title = String(video.title || video.desc || video.description || "Vídeo de TikTok")
+    .replace(/[\r\n]+/g, " ").slice(0, 220);
+  const author = video.author || {};
+  const username = String(author.nickname || author.unique_id || video.author_name || "No disponible").slice(0, 70);
+  const duration = formatVideoDuration(video.duration);
+  const views = video.play_count ?? video.views ?? video.statistics?.play_count;
+  const likes = video.digg_count ?? video.likes ?? video.statistics?.digg_count;
+  const postUrl = tiktokPostUrl(video);
+  const mediaUrl = tiktokMediaUrl(video);
+  const key = tiktokVideoId(video) || postUrl || mediaUrl;
+  session.queued.delete(key);
+  session.seen.add(key);
+  session.current = { postUrl, mediaUrl, title, username, duration, key };
+  const caption = [
+    `☪️ *${BOT_NAME}* ☪️`,
+    "",
+    `🔎 *Búsqueda:* ${session.query}`,
+    `🎬 *Vídeo:* ${title}`,
+    `👤 *Usuario:* ${username}`,
+    `⏱️ *Duración:* ${duration}`,
+    views !== undefined ? `▶️ *Vistas:* ${Number(views).toLocaleString("es-MX")}` : null,
+    likes !== undefined ? `❤️ *Me gusta:* ${Number(likes).toLocaleString("es-MX")}` : null,
+    postUrl ? `🔗 ${postUrl}` : null,
+    "",
+    `🎞️ Resultado ${session.index}`
+  ].filter(Boolean).join("\n");
+  const thumbnail = video.cover || video.origin_cover || video.ai_dynamic_cover || video.thumbnail;
+  if (typeof thumbnail === "string" && /^https?:\/\//i.test(thumbnail)) {
+    try { await sock.sendMessage(jid, { image: { url: thumbnail }, caption }); }
+    catch (_) { await sock.sendMessage(jid, { text: caption }); }
+  } else {
+    await sock.sendMessage(jid, { text: caption });
+  }
+  try {
+    if (!sendInteractiveButtons) throw new Error("baileys_helper no está instalado");
+    await sendInteractiveButtons(sock, jid, {
+      text: "¿Qué quieres hacer con este vídeo?",
+      footer: "DEXTER MODZ • TikTok Search",
+      buttons: [
+        { id: ".ttdownload", text: "⬇️ Download" },
+        { id: ".ttnext", text: "➡️ Ver siguiente" }
+      ]
+    });
+  } catch (error) {
+    log("[TIKTOK SEARCH BUTTONS]", error.message);
+    await sock.sendMessage(jid, {
+      text: "⬇️ Descargar: .ttdownload\n➡️ Siguiente: .ttnext"
+    });
+  }
+}
+
+async function handleTikTokSearch(sock, jid, query) {
+  const clean = String(query || "").trim().slice(0, 120);
+  if (clean.length < 2) {
+    return sock.sendMessage(jid, { text: "🔎 Uso: .tiktoksearch palabra o frase\nEjemplo: .tiktoksearch free fire" });
+  }
+  try {
+    const normalized = clean.toLowerCase();
+    const seenKey = `${jid}:${normalized}`;
+    const now = Date.now();
+    let seenEntry = tiktokSearchSeen.get(seenKey);
+    if (!seenEntry || now - seenEntry.updatedAt > 30 * 60 * 1000) seenEntry = { ids: new Set(), updatedAt: now };
+    seenEntry.updatedAt = now;
+    tiktokSearchSeen.set(seenKey, seenEntry);
+    const session = { query: clean, cursor: 0, results: [], index: 0, hasMore: true, seen: seenEntry.ids, queued: new Set(), current: null };
+    tiktokSearchSessions.set(jid, session);
+    if (tiktokSearchSeen.size > 300) {
+      for (const [key, value] of tiktokSearchSeen) {
+        if (now - value.updatedAt > 30 * 60 * 1000) tiktokSearchSeen.delete(key);
+      }
+    }
+    await sock.sendMessage(jid, { text: `🔎 Buscando vídeos de TikTok para: *${clean}*...` });
+    await sendTikTokSearchResult(sock, jid, session);
+  } catch (error) {
+    log("[TIKTOK SEARCH]", error.message);
+    await sock.sendMessage(jid, `❌ No pude buscar en TikTok. El servicio de búsqueda puede estar temporalmente limitado.\n\n${String(error.message || error).slice(0, 250)}`);
+  }
+}
+
+async function handleTikTokNext(sock, jid) {
+  const session = tiktokSearchSessions.get(jid);
+  if (!session) return sock.sendMessage(jid, { text: "Primero realiza una búsqueda: .tiktoksearch free fire" });
+  try { return await sendTikTokSearchResult(sock, jid, session); }
+  catch (error) {
+    log("[TIKTOK NEXT]", error.message);
+    return sock.sendMessage(jid, "❌ No pude cargar el siguiente resultado. Inténtalo de nuevo.");
+  }
+}
+
+async function handleTikTokSearchDownload(sock, jid) {
+  const current = tiktokSearchSessions.get(jid)?.current;
+  if (!current) return sock.sendMessage(jid, { text: "Primero busca un vídeo con .tiktoksearch." });
+  if (current.postUrl) return heavy(sock, jid, () => downloadAndSend(sock, jid, current.postUrl, "video", "tiktok"));
+  if (current.mediaUrl) {
+    try {
+      await sock.sendMessage(jid, {
+        video: { url: current.mediaUrl },
+        mimetype: "video/mp4",
+        caption: `🔥 ${BOT_NAME}\n\n🎬 ${current.title}\n👤 ${current.username}\n⏱️ ${current.duration}\n\n👤 by Dxx Modz Sk`
+      });
+    } catch (error) {
+      log("[TIKTOK SEARCH DOWNLOAD]", error.message);
+      await sock.sendMessage(jid, "❌ No se pudo descargar ese resultado. Prueba con otro vídeo.");
+    }
+    return;
+  }
+  return sock.sendMessage(jid, { text: "❌ Este resultado no tiene un enlace descargable." });
+}
+
+// ======================================================
 // MENU (formato Luno Bot, con "reenviado de canal")
 // ======================================================
 
@@ -2506,7 +2709,7 @@ function getMenu() {
   });
   const cmds = list => list.map(c => `> *${c}*`).join("\n");
   const sections = [
-    ["DESCARGAS", [".play", ".ytmp4", ".fb", ".ig", ".tiktok", ".xvideos", ".pornhub", ".erome"]],
+    ["DESCARGAS", [".play", ".ytmp4", ".fb", ".ig", ".tiktok", ".tiktoksearch", ".xvideos", ".pornhub", ".erome"]],
     ["CATÁLOGO", [".tetas", ".culos", ".addtetas (owner)", ".addculos (owner)"]],
     ["STICKERS", [".s", ".toimg"]],
     ["TEXTOS", [".negrita", ".cursiva", ".tachado", ".subrayada"]],
@@ -2602,7 +2805,7 @@ const KNOWN_COMMANDS = new Set([
   "negrita", "cursiva", "tachado", "subrayada",
   "ahorcado", "v/f", "vf", "v", "f",
   "abrir", "cerrar", "invocar", "tag", "tagall", "hidetag", "admins", "infogrupo", "warn", "kick", "promote", "demote", "encuesta", "sorteo",
-  "play", "ytmp4", "fb", "ig", "tiktok", "xvideos", "xvdownload", "pornhub", "phdownload", "erome", "eromedownload",
+  "play", "ytmp4", "fb", "ig", "tiktok", "tiktoksearch", "ttdownload", "ttnext", "xvideos", "xvdownload", "pornhub", "phdownload", "erome", "eromedownload",
   "hola", "menu", "help", "comandos", "ping", "info", "uptime", "runtime",
   "code", "delsesion", "dados", "moneda", "8ball", "ppt", "ship", "trivia", "respuesta", "mayus", "upper", "minus", "lower", "reverse", "contar", "base64", "random", "status", "ram", "disk", "version", "changelog"
 ]);
@@ -2614,7 +2817,7 @@ function isKnownCommand(cmd) {
     NOT_AVAILABLE.has(cmd);
 }
 const NOT_AVAILABLE = new Set([
-  "tiktoksearch", "google", "ia", "deepseek", "chatgpt"
+  "google", "ia", "deepseek", "chatgpt"
 ]);
 
 async function heavy(sock, jid, task) {
@@ -2739,6 +2942,14 @@ async function handleMessage(sock, msg, ctx = {}) {
       }
       return heavy(sock, jid, () => downloadAndSend(sock, jid, url, "video", "xvideos"));
     }
+
+    // Búsqueda TikTok: muestra un vídeo con botones Download/Siguiente.
+    case cmd === "tiktoksearch":
+      return heavy(sock, jid, () => handleTikTokSearch(sock, jid, args));
+    case cmd === "ttnext":
+      return heavy(sock, jid, () => handleTikTokNext(sock, jid));
+    case cmd === "ttdownload":
+      return handleTikTokSearchDownload(sock, jid);
 
     // Descargas
     case cmd === "play": {

@@ -55,3 +55,11 @@ Los comandos que necesitan servicios externos/API (por ejemplo IA, Google, Shaza
 - Variables de entorno necesarias en Render: `IMGPILE_API_KEY`, `GITHUB_TOKEN`, `GITHUB_OWNER`, `GITHUB_REPO`, `GITHUB_BRANCH` (normalmente `main`) y `OWNER_NUMBER`.
 - El token de GitHub necesita permiso **Contents: Read and write** en ese repositorio. Las imágenes se alojan en ImgPile; GitHub solo guarda el índice JSON.
 - Usa únicamente imágenes de personas adultas que hayan consentido expresamente su distribución y para las que tengas derecho de publicación. Nunca subas imágenes íntimas no consentidas ni contenido de menores.
+
+### Buscador TikTok
+
+- `.tiktoksearch palabra o frase`: busca vídeos públicos y muestra uno por mensaje con información del vídeo.
+- Cada resultado incluye los botones **Download** y **Ver siguiente**. Download descarga el resultado actual; Ver siguiente avanza en la misma búsqueda.
+- La búsqueda usa el endpoint no oficial de TikWM (`www.tikwm.com/api/feed/search`). No requiere añadir una variable nueva, pero el proveedor puede limitar solicitudes o cambiar el endpoint.
+- Los resultados se mezclan y el bot evita repetir los vídeos ya mostrados en búsquedas recientes del mismo chat (mientras el proceso siga activo).
+- `.tiktok URL` se conserva como descarga directa por enlace y no cambia.
