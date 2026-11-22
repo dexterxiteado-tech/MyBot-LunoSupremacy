@@ -474,12 +474,16 @@ async function handleNsfwRandom(sock, jid, category) {
     }
     const item = index.items[Math.floor(Math.random() * index.items.length)];
     if (!item?.url || !/^https:\/\//i.test(item.url)) throw new Error("El registro seleccionado no tiene una URL válida.");
+    const commandCaption = category === "tetas" ? ".tetas" : ".culos";
     await sock.sendMessage(jid, {
       image: { url: item.url },
       caption: `☪️ *Luno Supremacy* ☪️
-🏷️ ${item.name || NSFW_CATEGORIES[category].label}
 
-👤 By Dxx Modz`
+` +
+        `\`Liko 🤤 vrd usa el comando ${commandCaption} para ver mas\`
+
+` +
+        `👤 By Dxx Modz`
     });
   } catch (error) {
     log(`[NSFW RANDOM ${category}]`, error.message);
@@ -794,13 +798,8 @@ const REACT_EMOJI = /^(off|none|no|0)$/i.test(REACT_RAW) ? "" : REACT_RAW;
 const BOT_VERSION = process.env.BOT_VERSION || "v.1.0.0";
 const BOT_FOOTER = process.env.BOT_FOOTER || "by Dxx Modz";
 const YOUTUBE_LINK = process.env.YOUTUBE_LINK || "";
-const CHANNEL_JID = process.env.CHANNEL_JID || "";          // Opcional: 120363...@newsletter
-const CHANNEL_NAME = process.env.CHANNEL_NAME || BOT_NAME;
-// Publicación del canal que se mostrará como origen únicamente en .menu.
-const CHANNEL_INVITE_CODE = process.env.CHANNEL_INVITE_CODE || "0029Vb7jQB43mFY68g0CEA1U";
-const CHANNEL_POST_ID = Number(process.env.CHANNEL_POST_ID || 1949);
-let cachedChannelMetadata = null;
-let channelMetadataPromise = null;
+const CHANNEL_JID = process.env.CHANNEL_JID || "";          // 120363...@newsletter
+const CHANNEL_NAME = "愛 PAPI DEX 愛";
 const MENU_IMAGE_URL = process.env.MENU_IMAGE_URL || "";
 const MENU_IMAGE_FILE = ["menu.jpg", "menu.jpeg", "menu.png"]
   .map(n => path.join(__dirname, n))
@@ -2486,58 +2485,30 @@ function getMenu() {
   return out.join("\n");
 }
 
-async function getChannelMetadata(sock) {
-  if (cachedChannelMetadata) return cachedChannelMetadata;
-  if (!channelMetadataPromise) {
-    channelMetadataPromise = (async () => {
-      try {
-        if (sock && typeof sock.newsletterMetadata === "function" && CHANNEL_INVITE_CODE) {
-          const metadata = await sock.newsletterMetadata("invite", CHANNEL_INVITE_CODE);
-          if (metadata && metadata.id) {
-            cachedChannelMetadata = metadata;
-            return metadata;
-          }
-        }
-      } catch (error) {
-        log("[MENU CHANNEL METADATA]", error.message || error);
-      }
-      return null;
-    })();
-  }
-  return channelMetadataPromise;
-}
-
-async function channelContext(sock) {
-  const metadata = await getChannelMetadata(sock);
-  const newsletterJid = metadata?.id || CHANNEL_JID;
-  if (!newsletterJid || !Number.isFinite(CHANNEL_POST_ID) || CHANNEL_POST_ID <= 0) {
-    log("[MENU CHANNEL] No se pudo resolver el canal o el ID de publicación; se enviará el menú normal.");
-    return undefined;
-  }
-
+function channelContext() {
+  if (!CHANNEL_JID) return undefined;
   return {
     isForwarded: true,
-    forwardingScore: 1,
+    forwardingScore: 999,
     forwardedNewsletterMessageInfo: {
-      newsletterJid,
-      newsletterName: metadata?.name || CHANNEL_NAME,
-      serverMessageId: CHANNEL_POST_ID
+      newsletterJid: CHANNEL_JID,
+      newsletterName: CHANNEL_NAME,
+      serverMessageId: 100
     }
   };
 }
 
 async function sendMenu(sock, jid) {
   const caption = getMenu();
+  const contextInfo = channelContext();
   const image = MENU_IMAGE_FILE ? { url: MENU_IMAGE_FILE }
     : MENU_IMAGE_URL ? { url: MENU_IMAGE_URL } : null;
   try {
-    // La referencia al canal se agrega solamente al menú, no a los demás comandos.
-    const contextInfo = await channelContext(sock);
-    if (image) await sock.sendMessage(jid, { image, caption, ...(contextInfo ? { contextInfo } : {}) });
-    else await sock.sendMessage(jid, { text: caption, ...(contextInfo ? { contextInfo } : {}) });
+    if (image) await sock.sendMessage(jid, { image, caption, contextInfo });
+    else await sock.sendMessage(jid, { text: caption, contextInfo });
   } catch (e) {
     log("[MENU]", e.message);
-    await sock.sendMessage(jid, image ? { image, caption } : { text: caption });
+    await sock.sendMessage(jid, { text: caption });
   }
 }
 
