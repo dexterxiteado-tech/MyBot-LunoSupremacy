@@ -477,7 +477,12 @@ async function handleNsfwRandom(sock, jid, category) {
     await sock.sendMessage(jid, {
       image: { url: item.url },
       caption: `☪️ *Luno Supremacy* ☪️
-🏷️ ${item.name || NSFW_CATEGORIES[category].label}
+
+` +
+        (category === "culos"
+          ? "`Liko 🤤 vrd usa el comando .culos para ver mas`"
+          : "`Liko 🤤 vrd usa el comando .tetas para ver mas`") +
+        `
 
 👤 By Dxx Modz`
     });
