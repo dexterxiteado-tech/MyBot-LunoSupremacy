@@ -144,6 +144,12 @@ async function sendSoundSticker(sock, jid, webpPath, oggPath, seconds, quoted, f
   sticker.isAnimated = true;
   sticker.width = 512;
   sticker.height = 512;
+
+  // Metadatos que WhatsApp muestra debajo del sticker:
+  // "Luno Supremacy • Dxx Modz"
+  sticker.packId = process.env.STICKER_PACK_ID || 'luno-supremacy-sound';
+  sticker.packName = process.env.STICKER_PACK_NAME || 'Luno Supremacy';
+  sticker.packPublisher = process.env.STICKER_PACK_PUBLISHER || 'Dxx Modz';
   pendingAudio.set(hashKey(sticker.fileSha256), audioBytes);
   try {
     const message = generateWAMessageFromContent(jid, { stickerMessage: sticker }, {

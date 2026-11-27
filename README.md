@@ -86,3 +86,13 @@ La función usa un parche protobuf no oficial de Baileys para adjuntar `AudioMes
 
 **Nota:** los videos privados o protegidos pueden requerir cookies de sesión; los sitios cambian y yt-dlp debe mantenerse actualizado. No compartas `cookies.txt` ni las sesiones de WhatsApp.
 
+### Metadatos del sticker con sonido
+
+WhatsApp mostrará debajo del sticker el nombre del paquete y el autor:
+
+- `STICKER_PACK_NAME=Luno Supremacy`
+- `STICKER_PACK_PUBLISHER=Dxx Modz`
+- `STICKER_PACK_ID=luno-supremacy-sound`
+
+Estas variables son opcionales; esos valores se usan automáticamente si no se configuran.
+\n
