@@ -118,32 +118,86 @@ async function waveform(ogg, ffmpeg) {
 }
 
 
-function makeStickerExif() {
-  // WhatsApp sticker pack metadata is read from the WebP EXIF chunk,
-  // not from arbitrary packName/packPublisher protobuf properties.
-  const exifHeader = Buffer.from([
-    0x49, 0x49, 0x2A, 0x00, 0x08, 0x00, 0x00, 0x00,
-    0x01, 0x00, 0x41, 0x57, 0x07, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x16, 0x00, 0x00, 0x00
-  ]);
-  const metadata = Buffer.from(JSON.stringify({
-    'sticker-pack-id': process.env.STICKER_PACK_ID || 'luno-supremacy-sound',
-    'sticker-pack-name': process.env.STICKER_PACK_NAME || '𝙻𝚞𝚗𝚘 𝚂𝚞𝚙𝚛𝚎𝚖𝚊𝚌𝚢',
-    'sticker-pack-publisher': process.env.STICKER_PACK_PUBLISHER || '𝙳𝚡𝚡 𝙼𝚘𝚍𝚣',
-    emojis: ['🎵', '🔥']
-  }), 'utf8');
-  return Buffer.concat([exifHeader, metadata]);
+
+function makeStickerExif(soundSha) {
+  const packName = String(process.env.STICKER_PACK_NAME || '𝙻𝚞𝚗𝚘 𝚂𝚞𝚙𝚛𝚎𝚖𝚊𝚌𝚢').trim().slice(0, 128);
+  const publisher = String(process.env.STICKER_PACK_PUBLISHER || '𝙳𝚡𝚡 𝙼𝚘𝚍𝚣').trim().slice(0, 128);
+  const digest = require('node:crypto').createHash('sha256')
+    .update(`stickers-con-sonido|${packName}|${publisher}`).digest('hex').slice(0, 32);
+  const packId = `${digest.slice(0,8)}-${digest.slice(8,12)}-${digest.slice(12,16)}-${digest.slice(16,20)}-${digest.slice(20,32)}`;
+  const meta = {
+    'sticker-pack-id': packId,
+    'sticker-pack-name': packName,
+    'sticker-pack-publisher': publisher,
+    emojis: ['🔊'],
+    'sound-sha256': soundSha
+  };
+  const json = Buffer.from(JSON.stringify(meta), 'utf8');
+
+  // Formato exacto usado por WA-audio-stickers: TIFF big-endian,
+  // tag 0x5741 ("WA") que apunta al JSON de metadatos.
+  const exif = Buffer.alloc(26 + json.length);
+  exif.set([0x4d, 0x4d, 0x00, 0x2a], 0);
+  exif.writeUInt32BE(8, 4);
+  exif.writeUInt16BE(1, 8);
+  exif.writeUInt16BE(0x5741, 10);
+  exif.writeUInt16BE(7, 12);
+  exif.writeUInt32BE(json.length, 14);
+  exif.writeUInt32BE(26, 18);
+  exif.writeUInt32BE(0, 22);
+  json.copy(exif, 26);
+  return exif;
 }
 
-async function addStickerExif(inputPath, outputPath) {
-  const exifPath = `${outputPath}.exif`;
-  try {
-    fs.writeFileSync(exifPath, makeStickerExif());
-    await run('webpmux', ['-set', 'exif', exifPath, inputPath, '-o', outputPath], 30000);
-    return outputPath;
-  } finally {
-    try { fs.unlinkSync(exifPath); } catch {}
+function webpChunk(fourcc, data) {
+  const pad = data.length & 1;
+  const out = Buffer.alloc(8 + data.length + pad);
+  out.write(fourcc, 0, 4, 'ascii');
+  out.writeUInt32LE(data.length, 4);
+  data.copy(out, 8);
+  return out;
+}
+
+function retagAnimatedWebp(webp, exif) {
+  if (webp.toString('ascii', 0, 4) !== 'RIFF' || webp.toString('ascii', 8, 12) !== 'WEBP') {
+    throw new Error('FFmpeg generó un WebP inválido (cabecera RIFF/WEBP incorrecta).');
   }
+  const chunks = [];
+  let offset = 12;
+  while (offset + 8 <= webp.length) {
+    const type = webp.toString('ascii', offset, offset + 4);
+    const size = webp.readUInt32LE(offset + 4);
+    const end = offset + 8 + size;
+    if (end > webp.length) throw new Error(`Chunk WebP ${type} truncado.`);
+    if (type !== 'EXIF') {
+      let data = Buffer.from(webp.subarray(offset + 8, end));
+      if (type === 'VP8X') {
+        if (data.length < 10) throw new Error('Chunk VP8X incompleto.');
+        data[0] |= 0x08; // flag EXIF presente
+      }
+      chunks.push(webpChunk(type, data));
+    }
+    offset = end + (size & 1);
+  }
+  if (!chunks.some(c => c.toString('ascii', 0, 4) === 'VP8X')) {
+    throw new Error('El WebP no contiene VP8X; no se puede añadir EXIF sin reconstruir la animación.');
+  }
+  chunks.push(webpChunk('EXIF', exif));
+  const body = Buffer.concat([Buffer.from('WEBP'), ...chunks]);
+  const riff = Buffer.alloc(8);
+  riff.write('RIFF', 0, 4, 'ascii');
+  riff.writeUInt32LE(body.length, 4);
+  return Buffer.concat([riff, body]);
+}
+
+async function addStickerExif(inputPath, outputPath, oggPath) {
+  const ogg = fs.readFileSync(oggPath);
+  const soundSha = require('node:crypto').createHash('sha256').update(ogg).digest('base64');
+  const exif = makeStickerExif(soundSha);
+  const original = fs.readFileSync(inputPath);
+  const tagged = retagAnimatedWebp(original, exif);
+  fs.writeFileSync(outputPath, tagged);
+  return outputPath;
 }
 
 async function sendSoundSticker(sock, jid, webpPath, oggPath, seconds, quoted, ffmpeg) {
@@ -151,7 +205,7 @@ async function sendSoundSticker(sock, jid, webpPath, oggPath, seconds, quoted, f
   if (typeof sock.waUploadToServer !== 'function') throw new Error('Baileys no ofrece waUploadToServer en esta conexión.');
   const upload = { upload: sock.waUploadToServer };
   const taggedWebpPath = `${webpPath}.metadata.webp`;
-  await addStickerExif(webpPath, taggedWebpPath);
+  await addStickerExif(webpPath, taggedWebpPath, oggPath);
   const [uploadedAudio, uploadedSticker, wave] = await Promise.all([
     prepareWAMessageMedia({ audio: fs.readFileSync(oggPath), mimetype: 'audio/ogg; codecs=opus', seconds }, upload),
     prepareWAMessageMedia({ sticker: fs.readFileSync(taggedWebpPath), isAnimated: true }, upload),

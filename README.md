@@ -107,3 +107,8 @@ Variables opcionales:
 - `STICKER_PACK_PUBLISHER=𝙳𝚡𝚡 𝙼𝚘𝚍𝚣`
 
 El nombre/autor se mostrarán donde el cliente de WhatsApp presente los metadatos de paquete del sticker; algunos clientes pueden no mostrarlos en la vista individual.
+
+
+### Corrección de imagen y metadatos de stickers con sonido
+
+La escritura de EXIF ahora replica el formato TIFF big-endian y el tag `0x5741` usado por WA-audio-stickers. También incluye `sound-sha256` calculado sobre el Ogg/Opus y marca correctamente el flag EXIF del chunk VP8X, conservando los chunks de animación originales. Ya no depende de `webpmux` para retaggear el WebP.\n
