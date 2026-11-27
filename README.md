@@ -63,3 +63,26 @@ Los comandos que necesitan servicios externos/API (por ejemplo IA, Google, Shaza
 - La búsqueda usa el endpoint no oficial de TikWM (`www.tikwm.com/api/feed/search`). No requiere añadir una variable nueva, pero el proveedor puede limitar solicitudes o cambiar el endpoint.
 - Los resultados se mezclan y el bot evita repetir los vídeos ya mostrados en búsquedas recientes del mismo chat (mientras el proceso siga activo).
 - `.tiktok URL` se conserva como descarga directa por enlace y no cambia.
+
+## Stickers animados con sonido
+
+Luno Supremacy incluye `.stiksonido` para generar un sticker animado cuyo audio queda incrustado en el mismo mensaje de WhatsApp (no manda el audio como archivo separado).
+
+**Desde un enlace:**
+
+```text
+.stiksonido https://enlace-del-video [inicio_segundos] [duracion_segundos]
+```
+
+**Desde un video:** envía un video con `.stiksonido` en el texto/caption, o responde al video con:
+
+```text
+.stiksonido [inicio_segundos] [duracion_segundos]
+```
+
+Por defecto usa los primeros 10 segundos; se puede indicar un inicio y una duración de hasta 30 segundos. El codificador intenta mantener el WebP animado por debajo de 500 KB y extrae audio Ogg/Opus sincronizado. Requiere FFmpeg/FFprobe con los codificadores `libwebp` y `libopus`, además de yt-dlp para enlaces. Los enlaces se descargan temporalmente y se eliminan al terminar.
+
+La función usa un parche protobuf no oficial de Baileys para adjuntar `AudioMessage` en el campo 26 de `StickerMessage`. WhatsApp puede cambiar el protocolo y algunos teléfonos/versiones pueden mostrar solo la animación. El envío de stickers con sonido no es una función oficial de Baileys ni de Meta.
+
+**Nota:** los videos privados o protegidos pueden requerir cookies de sesión; los sitios cambian y yt-dlp debe mantenerse actualizado. No compartas `cookies.txt` ni las sesiones de WhatsApp.
+

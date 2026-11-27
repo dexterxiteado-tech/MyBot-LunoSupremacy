@@ -5,6 +5,7 @@
 
 const { spawn, spawnSync } = require("child_process");
 const { downloadContentFromMessage } = require("@whiskeysockets/baileys");
+const { createSoundSticker } = require("./sound-sticker");
 let sendInteractiveButtons = null;
 try { sendInteractiveButtons = require("baileys_helper").sendButtons; } catch (_) {}
 const fs = require("fs");
@@ -635,6 +636,85 @@ async function handleSticker(sock, jid, message) {
     if (workDir && fs.existsSync(workDir)) {
       fs.rmSync(workDir, { recursive: true, force: true });
     }
+  }
+}
+
+// ======================================================
+// STICKER ANIMADO CON SONIDO (Baileys + FFmpeg + yt-dlp)
+// Uso: .stiksonido URL [inicio_segundos] [duracion_segundos]
+//      responder a un video con .stiksonido [inicio] [duracion]
+// ======================================================
+async function handleSoundSticker(sock, msg, jid, args) {
+  let workDir = null;
+  try {
+    const tokens = String(args || "").trim().split(/\s+/).filter(Boolean);
+    const urlIndex = tokens.findIndex(t => /^https?:\/\//i.test(t));
+    const url = urlIndex >= 0 ? tokens[urlIndex] : null;
+    const numeric = url ? tokens.slice(urlIndex + 1) : tokens;
+    const start = numeric[0] !== undefined ? Number(numeric[0]) : 0;
+    const duration = numeric[1] !== undefined ? Number(numeric[1]) : 10;
+    if (!Number.isFinite(start) || start < 0 || !Number.isFinite(duration) || duration <= 0 || duration > 30) {
+      await sock.sendMessage(jid, { text: "⚠️ Uso: .stiksonido enlace [inicio] [duración]\nO responde a un video: .stiksonido [inicio] [duración]\nMáximo: 30 segundos." }, { quoted: msg });
+      return;
+    }
+
+    workDir = fs.mkdtempSync(path.join(TEMP_DIR, "sound-sticker-"));
+    const inputPath = path.join(workDir, "input.mp4");
+
+    if (url) {
+      let parsed;
+      try { parsed = new URL(url); } catch (_) { throw new Error("El enlace no es válido."); }
+      if (!["http:", "https:"].includes(parsed.protocol) || !parsed.hostname ||
+          /^(localhost|127\.|10\.|192\.168\.|169\.254\.)/i.test(parsed.hostname) || parsed.hostname.endsWith(".local")) {
+        throw new Error("Solo se permiten enlaces públicos http/https.");
+      }
+      await ytDlpReady;
+      await sock.sendMessage(jid, { text: `⏳ Descargando video para crear tu sticker con sonido...\n🌐 ${parsed.hostname}` }, { quoted: msg });
+      const outputTemplate = path.join(workDir, "source.%(ext)s");
+      const ytdlpArgs = [
+        "--no-playlist", "--no-progress", "--no-warnings", "--no-colors",
+        "-f", "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/b",
+        "--merge-output-format", "mp4", "-o", outputTemplate,
+        "--print", "after_move:filepath"
+      ];
+      if (path.isAbsolute(FFMPEG)) ytdlpArgs.push("--ffmpeg-location", FFMPEG);
+      if (YTDLP_BIN === YTDLP_LOCAL) ytdlpArgs.push("--js-runtimes", "node");
+      const cookiePath = process.env.COOKIES_TXT ? path.join(workDir, "cookies.txt") : path.join(DATA_DIR, "cookies.txt");
+      if (process.env.COOKIES_TXT) fs.writeFileSync(cookiePath, normalizeCookies(process.env.COOKIES_TXT), { mode: 0o600 });
+      if (fs.existsSync(cookiePath)) ytdlpArgs.push("--cookies", cookiePath);
+      ytdlpArgs.push(url);
+      const result = await runProcess(getYtDlpCommand(), ytdlpArgs, 0);
+      const candidates = result.stdout.split(/\r?\n/).map(x => x.trim()).filter(Boolean);
+      const downloaded = candidates.reverse().find(x => fs.existsSync(x));
+      if (!downloaded) throw new Error("yt-dlp terminó, pero no encontré el video descargado.");
+      if (downloaded !== inputPath) fs.copyFileSync(downloaded, inputPath);
+    } else {
+      const target = getMediaTarget(msg.message);
+      if (!target || target.kind !== "video") {
+        await sock.sendMessage(jid, { text: "🎞️ Envíame un video con audio y escribe .stiksonido en el texto, o responde al video con .stiksonido.\n\nTambién puedes usar:\n.stiksonido https://enlace [inicio] [duración]" }, { quoted: msg });
+        return;
+      }
+      await sock.sendMessage(jid, { text: "⏳ Procesando video y preparando sticker con sonido..." }, { quoted: msg });
+      const buffer = await downloadMediaBuffer(target);
+      fs.writeFileSync(inputPath, buffer);
+    }
+
+    const result = await createSoundSticker({
+      sock, jid, inputPath, workDir, ffmpeg: FFMPEG,
+      ffprobe: process.env.FFPROBE_PATH || "ffprobe",
+      start, duration, quoted: msg
+    });
+    await sock.sendMessage(jid, {
+      text: `☪️ *Luno Supremacy*\n\n🔊 Sticker con sonido creado\n⏱️ ${result.duration.toFixed(2)} s\n🎞️ ${result.fps} FPS\n📦 ${formatBytes(result.bytes)}\n\n👤 By Dxx Modz`
+    }, { quoted: msg });
+    log("[SOUND STICKER] Enviado:", formatBytes(result.bytes), `${result.duration}s`, `${result.fps}fps`);
+  } catch (error) {
+    log("[SOUND STICKER ERROR]", error.stack || error.message);
+    await sock.sendMessage(jid, {
+      text: `❌ No se pudo crear el sticker con sonido.\n\n${String(error.message || error).slice(0, 900)}\n\nComprueba que FFmpeg tenga libwebp y libopus, y que yt-dlp esté actualizado.`
+    }, { quoted: msg }).catch(() => {});
+  } finally {
+    if (workDir) fs.rmSync(workDir, { recursive: true, force: true });
   }
 }
 
@@ -2738,7 +2818,7 @@ function getMenu() {
   const sections = [
     ["DESCARGAS", [".play", ".ytmp4", ".fb", ".ig", ".tiktok", ".tiktoksearch", ".xvideos", ".pornhub", ".erome"]],
     ["CATÁLOGO", [".tetas", ".culos", ".addtetas (owner)", ".addculos (owner)"]],
-    ["STICKERS", [".s", ".toimg"]],
+    ["STICKERS", [".s", ".stiksonido", ".toimg"]],
     ["TEXTOS", [".negrita", ".cursiva", ".tachado", ".subrayada"]],
     ["JUEGOS", [".ahorcado", ".v/f", ".trivia", ".respuesta", ".ppt", ".dados", ".moneda", ".8ball", ".ship"]],
     ["GRUPOS", [".abrir", ".cerrar", ".tag", ".tagall", ".hidetag", ".admins", ".infogrupo", ".warn", ".kick", ".promote", ".demote", ".encuesta", ".invocar", ".sorteo", ".antilink", ".antispam",
@@ -2828,7 +2908,7 @@ const lastCommandAt = new Map();
 const pendingJobs = new Set();
 const COOLDOWN_MS = 1500;
 const KNOWN_COMMANDS = new Set([
-  "s", "sticker", "toimg", "toaudio", "qr", "addtetas", "addculos", "tetas", "culos",
+  "s", "sticker", "stiksonido", "toimg", "toaudio", "qr", "addtetas", "addculos", "tetas", "culos",
   "negrita", "cursiva", "tachado", "subrayada",
   "ahorcado", "v/f", "vf", "v", "f",
   "abrir", "cerrar", "invocar", "tag", "tagall", "hidetag", "admins", "infogrupo", "warn", "kick", "promote", "demote", "encuesta", "sorteo",
@@ -2920,6 +3000,8 @@ async function handleMessage(sock, msg, ctx = {}) {
       return heavy(sock, jid, () => handleNsfwRandom(sock, jid, "culos", msg.key?.id));
 
     // Stickers y multimedia
+    case cmd === "stiksonido":
+      return heavy(sock, jid, () => handleSoundSticker(sock, msg, jid, args));
     case cmd === "s" || cmd === "sticker":
       return heavy(sock, jid, () => handleSticker(sock, jid, msg.message));
     case cmd === "toimg":
