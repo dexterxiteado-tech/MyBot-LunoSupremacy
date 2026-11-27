@@ -90,9 +90,20 @@ La función usa un parche protobuf no oficial de Baileys para adjuntar `AudioMes
 
 WhatsApp mostrará debajo del sticker el nombre del paquete y el autor:
 
-- `STICKER_PACK_NAME=Luno Supremacy`
-- `STICKER_PACK_PUBLISHER=Dxx Modz`
+- `STICKER_PACK_NAME=𝙻𝚞𝚗𝚘 𝚂𝚞𝚙𝚛𝚎𝚖𝚊𝚌𝚢`
+- `STICKER_PACK_PUBLISHER=𝙳𝚡𝚡 𝙼𝚘𝚍𝚣`
 - `STICKER_PACK_ID=luno-supremacy-sound`
 
 Estas variables son opcionales; esos valores se usan automáticamente si no se configuran.
 \n
+
+### Metadatos visibles del sticker
+
+Los datos del paquete se escriben en el chunk EXIF del WebP antes de subirlo a WhatsApp (no como propiedades inventadas del protobuf). La imagen se procesa con `webpmux`, incluido en el paquete `webp` instalado por Docker.
+
+Variables opcionales:
+- `STICKER_PACK_ID=luno-supremacy-sound`
+- `STICKER_PACK_NAME=𝙻𝚞𝚗𝚘 𝚂𝚞𝚙𝚛𝚎𝚖𝚊𝚌𝚢`
+- `STICKER_PACK_PUBLISHER=𝙳𝚡𝚡 𝙼𝚘𝚍𝚣`
+
+El nombre/autor se mostrarán donde el cliente de WhatsApp presente los metadatos de paquete del sticker; algunos clientes pueden no mostrarlos en la vista individual.

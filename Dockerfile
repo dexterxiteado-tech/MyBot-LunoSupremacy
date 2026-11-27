@@ -2,7 +2,7 @@ FROM node:20-slim
 
 # ffmpeg (stickers/audio), python3 + yt-dlp (descargas)
 RUN apt-get update \
- && apt-get install -y --no-install-recommends ffmpeg python3 python3-pip curl ca-certificates git tar \
+ && apt-get install -y --no-install-recommends ffmpeg webp python3 python3-pip curl ca-certificates git tar \
  && curl -fsSL https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp \
  && chmod a+rx /usr/local/bin/yt-dlp \
  && python3 -m pip install --break-system-packages --no-cache-dir gallery-dl \

@@ -117,13 +117,44 @@ async function waveform(ogg, ffmpeg) {
   return Uint8Array.from(bars.map(v => Math.round(v * 100 / peak)));
 }
 
+
+function makeStickerExif() {
+  // WhatsApp sticker pack metadata is read from the WebP EXIF chunk,
+  // not from arbitrary packName/packPublisher protobuf properties.
+  const exifHeader = Buffer.from([
+    0x49, 0x49, 0x2A, 0x00, 0x08, 0x00, 0x00, 0x00,
+    0x01, 0x00, 0x41, 0x57, 0x07, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x16, 0x00, 0x00, 0x00
+  ]);
+  const metadata = Buffer.from(JSON.stringify({
+    'sticker-pack-id': process.env.STICKER_PACK_ID || 'luno-supremacy-sound',
+    'sticker-pack-name': process.env.STICKER_PACK_NAME || '𝙻𝚞𝚗𝚘 𝚂𝚞𝚙𝚛𝚎𝚖𝚊𝚌𝚢',
+    'sticker-pack-publisher': process.env.STICKER_PACK_PUBLISHER || '𝙳𝚡𝚡 𝙼𝚘𝚍𝚣',
+    emojis: ['🎵', '🔥']
+  }), 'utf8');
+  return Buffer.concat([exifHeader, metadata]);
+}
+
+async function addStickerExif(inputPath, outputPath) {
+  const exifPath = `${outputPath}.exif`;
+  try {
+    fs.writeFileSync(exifPath, makeStickerExif());
+    await run('webpmux', ['-set', 'exif', exifPath, inputPath, '-o', outputPath], 30000);
+    return outputPath;
+  } finally {
+    try { fs.unlinkSync(exifPath); } catch {}
+  }
+}
+
 async function sendSoundSticker(sock, jid, webpPath, oggPath, seconds, quoted, ffmpeg) {
   installStickerAudioPatch();
   if (typeof sock.waUploadToServer !== 'function') throw new Error('Baileys no ofrece waUploadToServer en esta conexión.');
   const upload = { upload: sock.waUploadToServer };
+  const taggedWebpPath = `${webpPath}.metadata.webp`;
+  await addStickerExif(webpPath, taggedWebpPath);
   const [uploadedAudio, uploadedSticker, wave] = await Promise.all([
     prepareWAMessageMedia({ audio: fs.readFileSync(oggPath), mimetype: 'audio/ogg; codecs=opus', seconds }, upload),
-    prepareWAMessageMedia({ sticker: fs.readFileSync(webpPath), isAnimated: true }, upload),
+    prepareWAMessageMedia({ sticker: fs.readFileSync(taggedWebpPath), isAnimated: true }, upload),
     waveform(oggPath, ffmpeg)
   ]);
   const a = uploadedAudio.audioMessage;
@@ -145,11 +176,6 @@ async function sendSoundSticker(sock, jid, webpPath, oggPath, seconds, quoted, f
   sticker.width = 512;
   sticker.height = 512;
 
-  // Metadatos que WhatsApp muestra debajo del sticker:
-  // "Luno Supremacy • Dxx Modz"
-  sticker.packId = process.env.STICKER_PACK_ID || 'luno-supremacy-sound';
-  sticker.packName = process.env.STICKER_PACK_NAME || 'Luno Supremacy';
-  sticker.packPublisher = process.env.STICKER_PACK_PUBLISHER || 'Dxx Modz';
   pendingAudio.set(hashKey(sticker.fileSha256), audioBytes);
   try {
     const message = generateWAMessageFromContent(jid, { stickerMessage: sticker }, {
@@ -159,6 +185,7 @@ async function sendSoundSticker(sock, jid, webpPath, oggPath, seconds, quoted, f
     await sock.relayMessage(jid, message.message, { messageId: message.key.id });
   } finally {
     pendingAudio.delete(hashKey(sticker.fileSha256));
+    try { fs.unlinkSync(taggedWebpPath); } catch {}
   }
 }
 
